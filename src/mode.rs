@@ -10,6 +10,8 @@ pub enum Mode {
     Palette,
     /// `F1` key binding reference.
     Help,
+    /// Incremental `/` search prompt.
+    Search,
 }
 
 impl Mode {
@@ -21,6 +23,7 @@ impl Mode {
             Mode::Command => "COMMAND",
             Mode::Palette => "PALETTE",
             Mode::Help => "HELP",
+            Mode::Search => "SEARCH",
         }
     }
 }
@@ -37,6 +40,7 @@ mod tests {
             Mode::Command.label(),
             Mode::Palette.label(),
             Mode::Help.label(),
+            Mode::Search.label(),
         ];
         for (i, a) in labels.iter().enumerate() {
             for b in &labels[i + 1..] {

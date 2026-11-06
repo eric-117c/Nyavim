@@ -7,7 +7,7 @@ use std::path::Path;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::command::{self, Command};
-use crate::document::{ordered, Document, LoadError, Pos};
+use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
 use crate::mode::Mode;
 
 /// What the main loop should do after a key has been handled.
@@ -23,6 +23,18 @@ enum Operator {
     Change,
     Yank,
 }
+
+/// The search in flight or the last one, kept so `n`/`N` and the highlight keep working after the
+/// prompt closes.
+#[derive(Debug, Clone)]
+struct Search {
+    query: String,
+    origin: Pos,
+    origin_scroll: usize,
+}
+
+/// How many matches the status line bothers to count before it says "and more".
+const MATCH_COUNT_CAP: usize = 5000;
 
 /// The unnamed register plus how it was filled, which decides what `p` does.
 #[derive(Debug, Clone)]
@@ -63,6 +75,7 @@ pub struct App {
     scroll: usize,
     /// Whether the current insert session has taken its undo checkpoint yet.
     insert_started: bool,
+    search: Option<Search>,
     /// Text typed after `:`, without the colon.
     command_line: String,
     /// Text typed into the palette, and which of the matches is selected.
@@ -87,6 +100,7 @@ impl App {
             register: None,
             scroll: 0,
             insert_started: false,
+            search: None,
             command_line: String::new(),
             palette_query: String::new(),
             palette_selected: 0,
@@ -172,6 +186,47 @@ impl App {
 
     pub fn command_line(&self) -> &str {
         &self.command_line
+    }
+
+    /// The query to highlight in the buffer, if a search is active or was just confirmed.
+    pub fn search_highlight(&self) -> Option<(&str, bool)> {
+        let search = self.search.as_ref()?;
+        if search.query.is_empty() {
+            return None;
+        }
+        Some((&search.query, is_case_sensitive(&search.query)))
+    }
+
+    /// Query text for the `/` prompt row.
+    pub fn search_query(&self) -> &str {
+        self.search.as_ref().map(|s| s.query.as_str()).unwrap_or("")
+    }
+
+    /// `(index of the match under the cursor, total, whether counting stopped early)`.
+    pub fn search_progress(&self) -> Option<(usize, usize, bool)> {
+        let search = self.search.as_ref()?;
+        if search.query.is_empty() {
+            return None;
+        }
+        let case_sensitive = is_case_sensitive(&search.query);
+        let cursor = self.document().cursor();
+        let mut index = 0;
+        let mut total = 0;
+        let mut capped = false;
+
+        'lines: for line in 0..self.document().line_count() {
+            for col in self.document().find_all_in_line(line, &search.query, case_sensitive) {
+                total += 1;
+                if Pos::new(line, col) == cursor {
+                    index = total;
+                }
+                if total >= MATCH_COUNT_CAP {
+                    capped = true;
+                    break 'lines;
+                }
+            }
+        }
+        Some((index, total, capped))
     }
 
     pub fn palette_query(&self) -> &str {
@@ -296,6 +351,7 @@ impl App {
             Mode::Insert => self.handle_insert(key),
             Mode::Help => self.handle_help(key),
             Mode::Command => self.handle_command_line(key),
+            Mode::Search => self.handle_search(key),
             Mode::Palette => self.handle_palette(key),
         }
     }
@@ -337,6 +393,7 @@ impl App {
             }
             KeyCode::Esc => {
                 self.input = InputState::default();
+                self.search = None;
                 self.message = None;
                 return Outcome::Continue;
             }
@@ -433,6 +490,9 @@ impl App {
             KeyCode::Char('p') => self.paste(false),
             KeyCode::Char('P') => self.paste(true),
             KeyCode::Char('u') => self.undo(),
+            KeyCode::Char('/') => self.start_search(),
+            KeyCode::Char('n') => self.search_next(),
+            KeyCode::Char('N') => self.search_previous(),
             _ => {}
         }
     }
@@ -695,6 +755,149 @@ impl App {
         }
     }
 
+
+    // ---- search --------------------------------------------------------
+
+    fn start_search(&mut self) {
+        self.search = Some(Search {
+            query: String::new(),
+            origin: self.document().cursor(),
+            origin_scroll: self.scroll,
+        });
+        self.mode = Mode::Search;
+        self.message = None;
+    }
+
+    fn handle_search(&mut self, key: KeyEvent) -> Outcome {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
+            return self.try_quit();
+        }
+        match key.code {
+            KeyCode::Esc => self.cancel_search(),
+            KeyCode::Enter => self.mode = Mode::Normal,
+            KeyCode::Backspace => {
+                if let Some(search) = self.search.as_mut() {
+                    search.query.pop();
+                }
+                self.update_search_cursor();
+            }
+            KeyCode::Char(ch) => {
+                if let Some(search) = self.search.as_mut() {
+                    search.query.push(ch);
+                }
+                self.update_search_cursor();
+            }
+            _ => {}
+        }
+        Outcome::Continue
+    }
+
+    /// Give up the search: back to where `/` was pressed, highlight gone.
+    fn cancel_search(&mut self) {
+        if let Some(search) = self.search.take() {
+            self.doc_mut().set_cursor(search.origin);
+            self.scroll = search.origin_scroll;
+        }
+        self.mode = Mode::Normal;
+    }
+
+    /// Jump to the first match from where the search started, wrapping once.
+    fn update_search_cursor(&mut self) {
+        let Some(search) = self.search.clone() else {
+            return;
+        };
+        if search.query.is_empty() {
+            self.doc_mut().set_cursor(search.origin);
+            self.message = None;
+            return;
+        }
+        let case_sensitive = is_case_sensitive(&search.query);
+        let found = self
+            .document()
+            .find_forward(search.origin, &search.query, case_sensitive)
+            .or_else(|| {
+                self.document()
+                    .find_forward(Pos::new(0, 0), &search.query, case_sensitive)
+            });
+        self.report_match(found, &search.query);
+    }
+
+    fn search_next(&mut self) {
+        let Some(query) = self.search.as_ref().map(|s| s.query.clone()) else {
+            self.message = Some("no search yet — press / to search".to_owned());
+            return;
+        };
+        if query.is_empty() {
+            return;
+        }
+        let case_sensitive = is_case_sensitive(&query);
+        let from = self.next_position(self.document().cursor());
+        let found = self
+            .document()
+            .find_forward(from, &query, case_sensitive)
+            .or_else(|| self.document().find_forward(Pos::new(0, 0), &query, case_sensitive));
+        self.report_match(found, &query);
+    }
+
+    fn search_previous(&mut self) {
+        let Some(query) = self.search.as_ref().map(|s| s.query.clone()) else {
+            self.message = Some("no search yet — press / to search".to_owned());
+            return;
+        };
+        if query.is_empty() {
+            return;
+        }
+        let case_sensitive = is_case_sensitive(&query);
+        let cursor = self.document().cursor();
+        let from = match self.previous_position(cursor) {
+            Some(pos) => pos,
+            None => return self.report_match(None, &query),
+        };
+        let found = self
+            .document()
+            .find_backward(from, &query, case_sensitive)
+            .or_else(|| {
+                let last = Pos::new(
+                    self.document().line_count() - 1,
+                    self.document().line_len(self.document().line_count() - 1),
+                );
+                self.document().find_backward(last, &query, case_sensitive)
+            });
+        self.report_match(found, &query);
+    }
+
+    fn report_match(&mut self, found: Option<Pos>, query: &str) {
+        match found {
+            Some(pos) => {
+                self.doc_mut().set_cursor(pos);
+                self.message = None;
+            }
+            None => self.message = Some(format!("no match: {query}")),
+        }
+    }
+
+    /// The position one character after `pos`, for "search from after the cursor".
+    fn next_position(&self, pos: Pos) -> Pos {
+        if pos.col < self.document().line_len(pos.line) {
+            Pos::new(pos.line, pos.col + 1)
+        } else if pos.line + 1 < self.document().line_count() {
+            Pos::new(pos.line + 1, 0)
+        } else {
+            pos
+        }
+    }
+
+    /// The position one character before `pos`, for a backward search.
+    fn previous_position(&self, pos: Pos) -> Option<Pos> {
+        if pos.col > 0 {
+            Some(Pos::new(pos.line, pos.col - 1))
+        } else if pos.line > 0 {
+            Some(Pos::new(pos.line - 1, self.document().line_len(pos.line - 1)))
+        } else {
+            None
+        }
+    }
+
     // ---- insert mode ---------------------------------------------------
 
     fn handle_insert(&mut self, key: KeyEvent) -> Outcome {
@@ -807,6 +1010,18 @@ impl App {
                 } else {
                     Outcome::Quit
                 }
+            }
+            "search" => {
+                self.start_search();
+                Outcome::Continue
+            }
+            "search-next" => {
+                self.search_next();
+                Outcome::Continue
+            }
+            "search-previous" => {
+                self.search_previous();
+                Outcome::Continue
             }
             "undo" => {
                 self.undo();
@@ -1437,5 +1652,74 @@ mod tests {
             "a saved buffer may quit"
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), "first line: done\n");
+    }
+
+    fn search(app: &mut App, query: &str) {
+        app.handle_key(key(KeyCode::Char('/')));
+        for ch in query.chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+    }
+
+    #[test]
+    fn incremental_search_jumps_to_the_first_match() {
+        let mut app = app_with("one\ntwo beta\nbeta three\n");
+        search(&mut app, "beta");
+        assert_eq!(app.mode(), Mode::Search);
+        assert_eq!(app.document().cursor(), Pos::new(1, 4));
+        assert_eq!(app.search_progress(), Some((1, 2, false)));
+
+        enter(&mut app);
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.search_highlight().is_some());
+
+        keys(&mut app, "n");
+        assert_eq!(app.document().cursor(), Pos::new(2, 0));
+        assert_eq!(app.search_progress().unwrap().0, 2);
+        keys(&mut app, "N");
+        assert_eq!(app.document().cursor(), Pos::new(1, 4));
+    }
+
+    #[test]
+    fn escape_cancels_search_and_restores_the_cursor() {
+        let mut app = app_with("one\nbeta\n");
+        search(&mut app, "beta");
+        assert_eq!(app.document().cursor(), Pos::new(1, 0));
+        esc(&mut app);
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.document().cursor(), Pos::new(0, 0));
+        assert!(app.search_highlight().is_none());
+        assert!(app.search_progress().is_none());
+    }
+
+    #[test]
+    fn search_wraps_and_reports_when_nothing_matches() {
+        let mut app = app_with("beta\nbeta\n");
+        search(&mut app, "beta");
+        enter(&mut app);
+        keys(&mut app, "n");
+        assert_eq!(app.document().cursor(), Pos::new(1, 0));
+        keys(&mut app, "n");
+        assert_eq!(app.document().cursor(), Pos::new(0, 0), "wraps around");
+
+        esc(&mut app);
+        search(&mut app, "zzz");
+        assert!(app.message().unwrap().contains("no match"));
+    }
+
+    #[test]
+    fn search_next_without_a_search_explains_itself() {
+        let mut app = app_with("abc\n");
+        keys(&mut app, "n");
+        assert!(app.message().unwrap().contains("press /"));
+    }
+
+    #[test]
+    fn editing_with_enter_in_insert_mode_does_not_start_a_search() {
+        let mut app = app_with("abc\n");
+        keys(&mut app, "i");
+        enter(&mut app);
+        assert_eq!(app.mode(), Mode::Insert);
+        assert_eq!(app.document().line_count(), 2);
     }
 }

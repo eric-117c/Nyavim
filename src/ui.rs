@@ -70,57 +70,91 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
     let bottom = (top + height).min(doc.line_count());
 
     let cursor_visible = !matches!(app.mode(), Mode::Help | Mode::Palette | Mode::Command);
+    let highlight = app.search_highlight();
     let mut lines = Vec::with_capacity(height);
     for idx in top..bottom {
+        let text = doc.line(idx);
         let cursor_col = if cursor_visible && idx == cursor.line {
             Some(cursor.col)
         } else {
             None
         };
+        let marks = match highlight {
+            Some((query, case_sensitive)) => {
+                let cols = doc.find_all_in_line(idx, query, case_sensitive);
+                marked_columns(&text, &cols, query.chars().count())
+            }
+            None => Vec::new(),
+        };
         let mut spans = vec![Span::styled(
             format!("{:>number_width$} ", idx + 1, number_width = number_width),
             Style::default().fg(Color::DarkGray),
         )];
-        spans.extend(line_spans(&doc.line(idx), cursor_col));
+        spans.extend(line_spans(&text, cursor_col, &marks));
         lines.push(Line::from(spans));
     }
 
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Split one buffer line into spans, reversing the cell under the cursor and drawing a caret when
-/// the cursor sits past the last character (insert mode at the end of a line).
-fn line_spans(text: &str, cursor_col: Option<usize>) -> Vec<Span<'static>> {
+/// Which characters of `text` belong to a search match, for highlighting.
+fn marked_columns(text: &str, starts: &[usize], needle_len: usize) -> Vec<bool> {
+    let total = text.chars().count();
+    let mut marks = vec![false; total];
+    for &start in starts {
+        for col in start..(start + needle_len).min(total) {
+            marks[col] = true;
+        }
+    }
+    marks
+}
+
+/// Split one buffer line into spans: the cursor cell is reversed, matches are highlighted, and a
+/// caret is drawn when the cursor sits past the last character (insert mode at the end of a line).
+fn line_spans(text: &str, cursor_col: Option<usize>, marks: &[bool]) -> Vec<Span<'static>> {
     let caret = Style::default().add_modifier(Modifier::REVERSED);
+    let hit = Style::default().fg(Color::Black).bg(Color::Yellow);
+
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut pending = String::new();
+    let mut run = String::new();
+    let mut run_style: Option<Style> = None;
     let total = text.chars().count();
 
     for (idx, ch) in text.chars().enumerate() {
-        if Some(idx) == cursor_col {
-            if !pending.is_empty() {
-                spans.push(Span::raw(std::mem::take(&mut pending)));
-            }
-            let mut cell = String::new();
-            if ch == '\t' {
-                cell.push_str(&" ".repeat(TAB_WIDTH));
-            } else {
-                cell.push(ch);
-            }
-            spans.push(Span::styled(cell, caret));
-        } else if ch == '\t' {
-            pending.push_str(&" ".repeat(TAB_WIDTH));
+        let style = if Some(idx) == cursor_col {
+            Some(caret)
+        } else if marks.get(idx).copied().unwrap_or(false) {
+            Some(hit)
         } else {
-            pending.push(ch);
+            None
+        };
+        if style != run_style {
+            flush(&mut spans, &mut run, run_style);
+            run_style = style;
+        }
+        if ch == '\t' {
+            run.push_str(&" ".repeat(TAB_WIDTH));
+        } else {
+            run.push(ch);
         }
     }
+    flush(&mut spans, &mut run, run_style);
+
     if cursor_col == Some(total) {
         spans.push(Span::styled(" ", caret));
     }
-    if !pending.is_empty() {
-        spans.push(Span::raw(pending));
-    }
     spans
+}
+
+fn flush(spans: &mut Vec<Span<'static>>, run: &mut String, style: Option<Style>) {
+    if run.is_empty() {
+        return;
+    }
+    let text = std::mem::take(run);
+    spans.push(match style {
+        Some(style) => Span::styled(text, style),
+        None => Span::raw(text),
+    });
 }
 
 fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
@@ -159,6 +193,20 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let mut spans = vec![mode, file, buffer_list, position, details];
+    if let Some((index, total, capped)) = app.search_progress() {
+        let capped = if capped { "+" } else { "" };
+        let text = if index == 0 {
+            format!("  ?/{total}{capped}")
+        } else {
+            format!("  {index}/{total}{capped}")
+        };
+        spans.push(Span::styled(
+            text,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if let Some(message) = app.message() {
         spans.push(Span::styled(
             format!("  {message}"),
@@ -169,13 +217,24 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_hint_line(frame: &mut Frame, area: Rect, app: &App) {
-    if app.mode() == Mode::Command {
-        let line = Line::from(vec![
-            Span::styled(":", Style::default().fg(Color::Cyan)),
-            Span::raw(app.command_line().to_owned()),
+    if matches!(app.mode(), Mode::Command | Mode::Search) {
+        let (prefix, text) = if app.mode() == Mode::Search {
+            ("/", app.search_query())
+        } else {
+            (":", app.command_line())
+        };
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(Color::Cyan)),
+            Span::raw(text.to_owned()),
             Span::styled("\u{2588}", Style::default().add_modifier(Modifier::REVERSED)),
-        ]);
-        frame.render_widget(Paragraph::new(line), area);
+        ];
+        if app.mode() == Mode::Search {
+            spans.push(Span::styled(
+                "   Enter accept · Esc cancel",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
 
@@ -466,5 +525,45 @@ mod tests {
         let screen = screen(&app, 40, 8);
         let last = screen.lines().nth(7).unwrap_or_default();
         assert!(last.contains(":write"), "command line row: {last:?}");
+    }
+
+    #[test]
+    fn search_matches_are_highlighted() {
+        use ratatui::style::Color;
+
+        let mut app = app_with("alpha beta\nbeta\n");
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('/'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        for ch in "beta".chars() {
+            app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char(ch),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // The cursor jumped onto the first match, so that cell is the caret; the match on the
+        // second line shows the plain highlight. Body starts on row 1, gutter is 4 cells wide.
+        let cursor_cell = &buffer[(4 + 6, 1)];
+        assert_eq!(
+            cursor_cell.style().add_modifier,
+            ratatui::style::Modifier::REVERSED,
+            "the match under the cursor is the caret"
+        );
+        let hit_cell = &buffer[(4, 2)];
+        assert_eq!(hit_cell.style().bg, Some(Color::Yellow), "other matches are highlighted");
+        assert_eq!(hit_cell.symbol(), "b");
+
+        let mut last_row = String::new();
+        for x in 0..40 {
+            last_row.push_str(buffer[(x, 7)].symbol());
+        }
+        assert!(last_row.contains("beta"), "prompt row shows the query: {last_row:?}");
     }
 }

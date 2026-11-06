@@ -42,6 +42,24 @@ pub const COMMANDS: &[Command] = &[
         keys: ":wq",
     },
     Command {
+        name: "search",
+        aliases: &[],
+        description: "Search this file as you type",
+        keys: "/",
+    },
+    Command {
+        name: "search-next",
+        aliases: &["n"],
+        description: "Jump to the next match of the last search",
+        keys: "n",
+    },
+    Command {
+        name: "search-previous",
+        aliases: &[],
+        description: "Jump to the previous match of the last search",
+        keys: "N",
+    },
+    Command {
         name: "undo",
         aliases: &["u"],
         description: "Undo the last change",
@@ -106,6 +124,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("dd cc yy", "the same, for whole lines"),
     ("x", "delete the character under the cursor"),
     ("u Ctrl+R", "undo / redo"),
+    ("/ n N", "search, next match, previous match"),
     ("p P", "paste after / before the cursor"),
     (":", "command line"),
     ("Ctrl+K", "command palette"),
