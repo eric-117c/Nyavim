@@ -13,6 +13,7 @@ use crate::git::{self, GitInfo};
 use crate::layout::{self, Layout, SplitDir};
 use crate::mode::Mode;
 use crate::syntax::{self, Language, State};
+use crate::terminal::Session;
 
 /// What the main loop should do after a key has been handled.
 #[derive(Debug, PartialEq, Eq)]
@@ -116,6 +117,8 @@ pub struct App {
     insert_started: bool,
     search: Option<Search>,
     replacer: Option<Replacer>,
+    /// The shell session while the terminal owns the screen.
+    terminal: Option<Session>,
     /// Commit message being typed after `:commit`.
     commit_message: String,
     /// Text typed after `:`, without the colon.
@@ -147,6 +150,7 @@ impl App {
             insert_started: false,
             search: None,
             replacer: None,
+            terminal: None,
             commit_message: String::new(),
             command_line: String::new(),
             palette_query: String::new(),
@@ -513,6 +517,45 @@ impl App {
         }
     }
 
+    // ---- terminal -------------------------------------------------------
+
+    /// Hand the screen to a shell. The editor keeps every buffer, cursor and undo stack untouched;
+    /// only drawing stops until the shell is left.
+    pub fn open_terminal(&mut self) {
+        if self.terminal.is_some() {
+            self.mode = Mode::Terminal;
+            return;
+        }
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+        let rows = self.area.height.saturating_sub(1).max(1);
+        let cols = self.area.width.max(1);
+        match Session::spawn(&shell, rows, cols) {
+            Ok(session) => {
+                self.terminal = Some(session);
+                self.mode = Mode::Terminal;
+                self.message = None;
+            }
+            Err(err) => self.message = Some(format!("could not start {shell}: {err}")),
+        }
+    }
+
+    pub fn terminal(&self) -> Option<&Session> {
+        self.terminal.as_ref()
+    }
+
+    pub fn terminal_mut(&mut self) -> Option<&mut Session> {
+        self.terminal.as_mut()
+    }
+
+    /// Come back to the editor. The shell session is discarded, not left running in the background.
+    pub fn leave_terminal(&mut self, finished: bool) {
+        self.terminal = None;
+        self.mode = Mode::Normal;
+        if finished {
+            self.message = Some("shell exited".to_owned());
+        }
+    }
+
     /// Git state of the focused buffer.
     pub fn git_info(&self) -> &GitInfo {
         static EMPTY: GitInfo = GitInfo {
@@ -648,6 +691,7 @@ impl App {
             Mode::ReplaceConfirm => self.handle_replace_confirm(key),
             Mode::WindowCmd => self.handle_window_command(key),
             Mode::CommitMsg => self.handle_commit_message(key),
+            Mode::Terminal => Outcome::Continue,
             Mode::Palette => self.handle_palette(key),
         }
     }
@@ -664,6 +708,10 @@ impl App {
                 }
                 KeyCode::Char('w') => {
                     self.mode = Mode::WindowCmd;
+                    Outcome::Continue
+                }
+                KeyCode::Char('t') => {
+                    self.open_terminal();
                     Outcome::Continue
                 }
                 KeyCode::Char('r') => {
@@ -1578,6 +1626,10 @@ impl App {
             }
             "redo" => {
                 self.redo();
+                Outcome::Continue
+            }
+            "terminal" => {
+                self.open_terminal();
                 Outcome::Continue
             }
             "git-commit" => {

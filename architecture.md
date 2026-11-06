@@ -15,12 +15,14 @@ title: nyavim 架构：分层、事件循环与可发现性契约
 | 文本与文件 | `src/document.rs` | rope、motion、编辑原语、搜索扫描、撤销历史、读写磁盘 | 终端、按键、模式、光标位置 |
 | 窗口几何 | `src/layout.rs` | 二叉树布局、矩形切分、窗口邻接、移除折叠 | 缓冲内容、终端、按键 |
 | 语法着色 | `src/syntax.rs` | 语言判定、行级词法、跨行状态 | 终端、光标、缓冲 |
+| 版本控制 | `src/git.rs` | 仓库/分支探测、行级 diff、提交 | 渲染、按键 |
+| shell 会话 | `src/terminal.rs` | pty、子进程、VT100 解析 | 编辑状态、布局 |
 | 状态与路由 | `src/app.rs` | 模式、缓冲列表、窗口与焦点、寄存器、待决按键、命令执行 | 渲染、I/O 细节 |
 | 可发现性数据 | `src/command.rs` | 命令表、键位表、别名解析、模糊搜索 | 任何状态 |
 | 渲染 | `src/ui.rs` | 四层布局与覆盖层 | 修改状态 |
 | 进程与 tty | `src/main.rs` | raw mode、alternate screen、panic 恢复、事件循环 | 编辑语义 |
 
-依赖单向：`main → ui → app → {document, layout, syntax, command}`，`command`、`layout`、`syntax` 不依赖任何其他模块。`ui` 只读 `App`，所以渲染可被无头测试（`TestBackend`）完整覆盖。
+依赖单向：`main → ui → app → {document, layout, syntax, command, git, terminal}`，除 `app` 外各模块彼此不依赖。`ui` 只读 `App`，所以渲染可被无头测试（`TestBackend`）完整覆盖。
 
 ## 事件循环
 
@@ -56,6 +58,19 @@ title: nyavim 架构：分层、事件循环与可发现性契约
 - 高亮状态是每窗口的：`Window` 记录视口首行对应的状态，滚动时只对进出视口的行推进；一次跳转超过 2 万行则放弃回推、以普通状态起步（宁可暂时不上色，也不让一帧卡住）。
 - 样式优先级固定：token 色 < 搜索命中底色 < 光标反显，保证光标在任何着色下都可见。
 - 颜色只用终端 8–16 色，跟随用户终端主题；主题配置留给 TOML 配置那一步。
+
+## git 集成
+
+- 只调外部 `git`，不重实现：`rev-parse --show-toplevel`、`rev-parse --abbrev-ref HEAD`（detached 退化为短 sha）、`show HEAD:<path>`，提交用 `add -u` + `commit -m`。
+- 行级 diff 在自己进程里做，因此**未保存的编辑也算进 gutter**；先剪公共前后缀（一行改动在大文件上零成本），中间段用有上限的 LCS，超限时整段标为 modified。
+- 刷新分两档：需要重启 git 的（打开、切换、保存、提交、`:git-refresh`）与只重算标记的（离开插入模式）。打字过程中不 spawn 进程。
+
+## 内置终端
+
+- 真 pty + VT100 解析（`libc` 开 pty，`vt100` 解析屏幕），不是管道 + 假装。全屏切换：`Ctrl+T` 进入、`Ctrl+\` 返回。
+- 会话期间编辑器状态完全不参与：缓冲、光标、撤销栈、分屏都原地保留，因此返回是即时的。
+- 输入按**原始字节**从 fd 0 读，不用按键事件，保证方向键/功能键/鼠标序列原样传给 shell。
+- 退出编辑器时不保留后台 shell（会话被丢弃），这是有意的简化。
 
 ## 脏标记与撤销
 

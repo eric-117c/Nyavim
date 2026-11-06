@@ -7,6 +7,7 @@ mod git;
 mod layout;
 mod mode;
 mod syntax;
+mod terminal;
 mod ui;
 
 use std::io;
@@ -70,8 +71,86 @@ fn restore_terminal_direct() -> io::Result<()> {
     execute!(io::stdout(), LeaveAlternateScreen)
 }
 
+/// Hand the screen to the shell and shuttle bytes until the user comes back.
+///
+/// Input is read as raw bytes rather than as key events, so the shell sees exactly what the terminal
+/// would have sent — arrows, function keys and all. `Ctrl+\\` is the way back.
+fn run_terminal(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
+    const BACK_TO_EDITOR: u8 = 0x1c;
+
+    loop {
+        let size = terminal.size()?;
+        app.set_area(size.width, size.height);
+        let rows = size.height.saturating_sub(1).max(1);
+        let cols = size.width.max(1);
+
+        let (master, finished) = {
+            let Some(session) = app.terminal_mut() else {
+                app.leave_terminal(false);
+                return Ok(());
+            };
+            session.resize(rows, cols);
+            session.drain_output();
+            (session.as_raw_fd(), session.is_finished())
+        };
+        if finished {
+            app.leave_terminal(true);
+            terminal.draw(|frame| ui::draw(frame, app))?;
+            return Ok(());
+        }
+
+        terminal.draw(|frame| ui::draw(frame, app))?;
+
+        let mut fds = [
+            libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: master,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: poll only reads/writes the revents fields of our two descriptors.
+        unsafe {
+            libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 60);
+        }
+
+        if fds[0].revents & libc::POLLIN != 0 {
+            let mut input = [0u8; 4096];
+            // SAFETY: reading into a stack buffer we own.
+            let count =
+                unsafe { libc::read(libc::STDIN_FILENO, input.as_mut_ptr().cast(), input.len()) };
+            if count > 0 {
+                let bytes = &input[..count as usize];
+                match bytes.iter().position(|byte| *byte == BACK_TO_EDITOR) {
+                    Some(at) => {
+                        if let Some(session) = app.terminal_mut() {
+                            session.write_input(&bytes[..at]);
+                        }
+                        app.leave_terminal(false);
+                        return Ok(());
+                    }
+                    None => {
+                        if let Some(session) = app.terminal_mut() {
+                            session.write_input(bytes);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn run(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
     loop {
+        if app.mode() == mode::Mode::Terminal {
+            run_terminal(terminal, app)?;
+            continue;
+        }
+
         let size = terminal.size()?;
         app.set_area(size.width, size.height);
         let focus = app.focused_window();

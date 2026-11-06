@@ -9,6 +9,8 @@ license = "MIT"
 ratatui = "0.29"
 ropey = "1.6"
 unicode-width = "0.2"
+vt100 = "0.15"
+libc = "0.2"
 
 [profile.release]
 lto = true

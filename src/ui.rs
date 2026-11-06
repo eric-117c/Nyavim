@@ -20,6 +20,10 @@ const NAME_WIDTH: usize = 14;
 pub const TAB_WIDTH: usize = 4;
 
 pub fn draw(frame: &mut Frame, app: &App) {
+    if app.mode() == Mode::Terminal {
+        draw_terminal(frame, app);
+        return;
+    }
     let area = frame.area();
     let rows = Layout::vertical([
         Constraint::Length(1), // tab bar
@@ -93,6 +97,86 @@ fn draw_body(frame: &mut Frame, _area: Rect, app: &App) {
 
     for (direction, rect) in app.separators() {
         draw_separator(frame, direction, rect);
+    }
+}
+
+/// Paint the shell's screen cell by cell, then put the terminal cursor where the shell wants it.
+fn draw_terminal(frame: &mut Frame, app: &App) {
+    let Some(session) = app.terminal() else {
+        return;
+    };
+    let screen = session.screen();
+    let area = frame.area();
+    let body_height = area.height.saturating_sub(1);
+    let (rows, cols) = screen.size();
+
+    {
+        let buffer = frame.buffer_mut();
+        for y in 0..rows.min(body_height) {
+            for x in 0..cols.min(area.width) {
+                let Some(cell) = screen.cell(y, x) else {
+                    continue;
+                };
+                let contents = cell.contents();
+                if contents.is_empty() {
+                    continue;
+                }
+                let mut style = Style::default();
+                if let Some(color) = vt_color(cell.fgcolor()) {
+                    style = style.fg(color);
+                }
+                if let Some(color) = vt_color(cell.bgcolor()) {
+                    style = style.bg(color);
+                }
+                let mut modifier = Modifier::empty();
+                if cell.bold() {
+                    modifier |= Modifier::BOLD;
+                }
+                if cell.italic() {
+                    modifier |= Modifier::ITALIC;
+                }
+                if cell.underline() {
+                    modifier |= Modifier::UNDERLINED;
+                }
+                if cell.inverse() {
+                    modifier |= Modifier::REVERSED;
+                }
+                buffer.set_string(
+                    area.x + x,
+                    area.y + y,
+                    &contents,
+                    style.add_modifier(modifier),
+                );
+            }
+        }
+    }
+
+    let (cursor_y, cursor_x) = screen.cursor_position();
+    if !screen.hide_cursor() && cursor_y < body_height && cursor_x < area.width {
+        frame.set_cursor_position((area.x + cursor_x, area.y + cursor_y));
+    }
+
+    let hint_area = Rect {
+        x: area.x,
+        y: area.y + body_height,
+        width: area.width,
+        height: 1,
+    };
+    let hint = Line::from(vec![
+        Span::styled(" Ctrl+\\ ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            "back to the editor  ·  the shell owns this screen",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(hint), hint_area);
+}
+
+fn vt_color(color: vt100::Color) -> Option<Color> {
+    match color {
+        vt100::Color::Default => None,
+        vt100::Color::Idx(index) => Some(Color::Indexed(index)),
+        vt100::Color::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
     }
 }
 

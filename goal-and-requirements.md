@@ -82,6 +82,8 @@ nyavim 是一个用 Rust 写的终端文本编辑器，用于读写日常的代�
 | 命令面板匹配 | 手写模糊匹配 | 匹配算法本身很小，避免为此引入额外 crate。 |
 | 配置 | serde + toml | 配置格式的唯一依赖。 |
 | 宽字符处理 | unicode-width | 中日韩文本与 emoji 的光标定位必需。 |
+| 终端模拟 | vt100 | 内置 shell 需要把 ANSI 输出还原成屏幕网格；比自写解析器可靠。 |
+| pty | libc | 真 shell 必须有 pty；只用来调 openpty/ioctl/fcntl，不承担其他职责。 |
 
 ## Open Questions
 

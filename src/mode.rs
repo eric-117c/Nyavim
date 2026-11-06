@@ -18,6 +18,8 @@ pub enum Mode {
     WindowCmd,
     /// `:commit` asking for a message on the last line.
     CommitMsg,
+    /// The shell owns the screen; the editor is suspended, not torn down.
+    Terminal,
 }
 
 impl Mode {
@@ -33,6 +35,7 @@ impl Mode {
             Mode::ReplaceConfirm => "REPLACE",
             Mode::WindowCmd => "WINDOW",
             Mode::CommitMsg => "COMMIT",
+            Mode::Terminal => "TERMINAL",
         }
     }
 }
@@ -53,6 +56,7 @@ mod tests {
             Mode::ReplaceConfirm.label(),
             Mode::WindowCmd.label(),
             Mode::CommitMsg.label(),
+            Mode::Terminal.label(),
         ];
         for (i, a) in labels.iter().enumerate() {
             for b in &labels[i + 1..] {

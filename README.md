@@ -32,10 +32,11 @@ Usable for real editing today:
 - `:s` / `:%s` literal substitute with `g` and `c` confirm
 - syntax highlighting for Rust, TOML, JSON, Markdown and shell (block comments and code fences carry
   across lines)
+- git integration: changed-line gutter, branch in the status line, `:commit` with an inline message
+- a real shell on a pty, one keystroke away (`Ctrl+T`, back with `Ctrl+\`)
 - line endings and BOM preserved, atomic saves
 
-Still to come: git integration, a built-in terminal, TOML configuration, crash recovery (swap files),
-and the >50 MB read-only mode.
+Still to come: TOML configuration, crash recovery (swap files), and the >50 MB read-only mode.
 
 The product definition lives in [`goal-and-requirements.md`](./goal-and-requirements.md).
 

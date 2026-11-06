@@ -84,6 +84,12 @@ pub const COMMANDS: &[Command] = &[
         keys: ":e <path>",
     },
     Command {
+        name: "terminal",
+        aliases: &["sh", "shell"],
+        description: "Hand the screen to a shell; Ctrl+\\ comes back",
+        keys: "Ctrl+T",
+    },
+    Command {
         name: "git-commit",
         aliases: &["commit"],
         description: "Stage tracked changes and commit them, with a message typed below",
@@ -177,6 +183,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Ctrl+N Ctrl+P", "next / previous open file"),
     (":sp :vsp", "split this window above/below or side by side"),
     (":commit", "type a message, then commit tracked changes"),
+    ("Ctrl+T", "open a shell; Ctrl+\\ returns to the editor"),
     (
         "Ctrl+W h j k l",
         "move focus to the window in that direction",
