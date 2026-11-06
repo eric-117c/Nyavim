@@ -30,10 +30,12 @@ Usable for real editing today:
 - tabs and window splits (`:sp`, `:vsp`, `Ctrl+W` + `hjkl`)
 - incremental `/` search with match highlighting, `n`/`N`
 - `:s` / `:%s` literal substitute with `g` and `c` confirm
+- syntax highlighting for Rust, TOML, JSON, Markdown and shell (block comments and code fences carry
+  across lines)
 - line endings and BOM preserved, atomic saves
 
-Still to come: syntax highlighting, git integration, a built-in terminal, TOML configuration, crash
-recovery (swap files), and the >50 MB read-only mode.
+Still to come: git integration, a built-in terminal, TOML configuration, crash recovery (swap files),
+and the >50 MB read-only mode.
 
 The product definition lives in [`goal-and-requirements.md`](./goal-and-requirements.md).
 
