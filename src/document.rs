@@ -78,7 +78,6 @@ impl Pos {
 #[derive(Debug, Clone)]
 pub struct Document {
     rope: Rope,
-    cursor: Pos,
     path: Option<PathBuf>,
     line_ending: LineEnding,
     has_bom: bool,
@@ -108,7 +107,6 @@ impl Document {
     pub fn empty() -> Self {
         Self {
             rope: Rope::new(),
-            cursor: Pos::default(),
             path: None,
             line_ending: LineEnding::Lf,
             has_bom: false,
@@ -169,8 +167,8 @@ impl Document {
 
     /// Remember the current state as the point `undo` returns to. Call this once before a change
     /// (one insert session, one operator), not per character.
-    pub fn checkpoint(&mut self) {
-        self.undo.push(self.snapshot());
+    pub fn checkpoint(&mut self, cursor: Pos) {
+        self.undo.push(self.snapshot(cursor));
         self.redo.clear();
         if self.undo.len() > UNDO_STEPS {
             self.undo.remove(0);
@@ -182,38 +180,32 @@ impl Document {
         }
     }
 
-    /// Step back to the last checkpoint. False when there is nothing left to undo.
-    pub fn undo(&mut self) -> bool {
-        let Some(previous) = self.undo.pop() else {
-            return false;
-        };
-        self.redo.push(self.snapshot());
-        self.apply(previous);
-        true
+    /// Step back to the last checkpoint, returning the cursor that went with it.
+    pub fn undo(&mut self, cursor: Pos) -> Option<Pos> {
+        let previous = self.undo.pop()?;
+        self.redo.push(self.snapshot(cursor));
+        Some(self.apply(previous))
     }
 
-    /// Step forward again. False when there is nothing to redo.
-    pub fn redo(&mut self) -> bool {
-        let Some(next) = self.redo.pop() else {
-            return false;
-        };
-        self.undo.push(self.snapshot());
-        self.apply(next);
-        true
+    /// Step forward again, returning the cursor that went with it.
+    pub fn redo(&mut self, cursor: Pos) -> Option<Pos> {
+        let next = self.redo.pop()?;
+        self.undo.push(self.snapshot(cursor));
+        Some(self.apply(next))
     }
 
-    fn snapshot(&self) -> Snapshot {
+    fn snapshot(&self, cursor: Pos) -> Snapshot {
         Snapshot {
             text: self.rope.to_string(),
-            cursor: self.cursor,
+            cursor,
             revision: self.revision,
         }
     }
 
-    fn apply(&mut self, snapshot: Snapshot) {
+    fn apply(&mut self, snapshot: Snapshot) -> Pos {
         self.rope = Rope::from_str(&snapshot.text);
         self.revision = snapshot.revision;
-        self.cursor = self.clamp(snapshot.cursor);
+        self.clamp_pos(snapshot.cursor)
     }
 
     pub fn rope(&self) -> &Rope {
@@ -254,16 +246,7 @@ impl Document {
         self.rope.to_string()
     }
 
-    // ---- cursor -------------------------------------------------------
-
-    pub fn cursor(&self) -> Pos {
-        self.cursor
-    }
-
-    /// Move the cursor, clamping it into the buffer.
-    pub fn set_cursor(&mut self, pos: Pos) {
-        self.cursor = self.clamp(pos);
-    }
+    // ---- cursor and motions -------------------------------------------
 
     /// Longest valid column, i.e. one past the last character (insert-mode position).
     pub fn line_len(&self, line: usize) -> usize {
@@ -279,21 +262,22 @@ impl Document {
         }
     }
 
-    /// Keep the cursor on a character when in normal mode, where sitting past the last character
-    /// would show a cursor that cannot be acted on.
-    pub fn clamp_normal(&mut self) {
-        let len = self.line_len(self.cursor.line);
-        self.cursor.col = if len == 0 {
-            0
-        } else {
-            self.cursor.col.min(len - 1)
-        };
-    }
-
-    fn clamp(&self, pos: Pos) -> Pos {
+    /// Clamp a position into the buffer.
+    pub fn clamp_pos(&self, pos: Pos) -> Pos {
         let line = pos.line.min(self.line_count().saturating_sub(1));
         let col = pos.col.min(self.line_len(line));
         Pos { line, col }
+    }
+
+    /// Keep the cursor on a character when in normal mode, where sitting past the last character
+    /// would show a cursor that cannot be acted on.
+    pub fn clamp_normal_pos(&self, pos: Pos) -> Pos {
+        let pos = self.clamp_pos(pos);
+        let len = self.line_len(pos.line);
+        Pos::new(
+            pos.line,
+            if len == 0 { 0 } else { pos.col.min(len - 1) },
+        )
     }
 
     fn char_index(&self, pos: Pos) -> usize {
@@ -304,13 +288,15 @@ impl Document {
 
     /// Text between two positions, ordered low to high.
     pub fn slice(&self, a: Pos, b: Pos) -> String {
-        let (a, b) = ordered(self.clamp(a), self.clamp(b));
-        self.rope.slice(self.char_index(a)..self.char_index(b)).to_string()
+        let (a, b) = ordered(self.clamp_pos(a), self.clamp_pos(b));
+        self.rope
+            .slice(self.char_index(a)..self.char_index(b))
+            .to_string()
     }
 
-    /// Remove and return the text between two positions.
+    /// Remove and return the text between two positions. The cursor is the caller's business.
     pub fn remove(&mut self, a: Pos, b: Pos) -> String {
-        let (a, b) = ordered(self.clamp(a), self.clamp(b));
+        let (a, b) = ordered(self.clamp_pos(a), self.clamp_pos(b));
         let (from, to) = (self.char_index(a), self.char_index(b));
         if from >= to {
             return String::new();
@@ -318,60 +304,59 @@ impl Document {
         let removed = self.rope.slice(from..to).to_string();
         self.rope.remove(from..to);
         self.revision += 1;
-        self.cursor = self.clamp(self.cursor);
         removed
     }
 
-    /// Insert text at a position without moving the cursor.
+    /// Insert text at a position without touching the cursor.
     pub fn insert_at(&mut self, pos: Pos, text: &str) {
         if text.is_empty() {
             return;
         }
-        let at = self.clamp(pos);
+        let at = self.clamp_pos(pos);
         let idx = self.char_index(at);
         self.rope.insert(idx, text);
         self.revision += 1;
     }
 
-    pub fn insert_char(&mut self, ch: char) {
-        let idx = self.char_index(self.cursor);
+    pub fn insert_char(&mut self, cursor: &mut Pos, ch: char) {
+        let idx = self.char_index(*cursor);
         self.rope.insert_char(idx, ch);
         self.revision += 1;
-        self.cursor.col += 1;
+        cursor.col += 1;
     }
 
-    pub fn insert_newline(&mut self) {
-        self.insert_char('\n');
-        self.cursor.line += 1;
-        self.cursor.col = 0;
+    pub fn insert_newline(&mut self, cursor: &mut Pos) {
+        self.insert_char(cursor, '\n');
+        cursor.line += 1;
+        cursor.col = 0;
     }
 
     /// Delete the character before the cursor, joining lines when at the start of one.
-    pub fn backspace(&mut self) {
-        if self.cursor.col > 0 {
-            let from = Pos::new(self.cursor.line, self.cursor.col - 1);
-            self.remove(from, self.cursor);
-            self.cursor.col -= 1;
-        } else if self.cursor.line > 0 {
-            let prev = self.cursor.line - 1;
+    pub fn backspace(&mut self, cursor: &mut Pos) {
+        if cursor.col > 0 {
+            let from = Pos::new(cursor.line, cursor.col - 1);
+            self.remove(from, *cursor);
+            cursor.col -= 1;
+        } else if cursor.line > 0 {
+            let prev = cursor.line - 1;
             let join = Pos::new(prev, self.line_len(prev));
-            self.remove(join, self.cursor);
-            self.cursor = join;
+            self.remove(join, *cursor);
+            *cursor = join;
         }
     }
 
     /// Delete the character under the cursor, joining lines when at the end of one.
-    pub fn delete_forward(&mut self) {
-        let len = self.line_len(self.cursor.line);
-        let to = if self.cursor.col < len {
-            Pos::new(self.cursor.line, self.cursor.col + 1)
-        } else if self.cursor.line + 1 < self.line_count() {
-            Pos::new(self.cursor.line + 1, 0)
+    pub fn delete_forward(&mut self, cursor: &mut Pos) {
+        let len = self.line_len(cursor.line);
+        let to = if cursor.col < len {
+            Pos::new(cursor.line, cursor.col + 1)
+        } else if cursor.line + 1 < self.line_count() {
+            Pos::new(cursor.line + 1, 0)
         } else {
             return;
         };
-        self.remove(self.cursor, to);
-        self.clamp_normal();
+        self.remove(*cursor, to);
+        *cursor = self.clamp_normal_pos(*cursor);
     }
 
     /// Remove a whole line including one of its line endings; returns the removed text.
@@ -398,9 +383,6 @@ impl Document {
         let removed = self.rope.slice(start..end).to_string();
         self.rope.remove(start..end);
         self.revision += 1;
-        self.cursor.line = self.cursor.line.min(self.line_count().saturating_sub(1));
-        self.cursor = self.clamp(self.cursor);
-        self.clamp_normal();
         removed
     }
 
@@ -427,74 +409,75 @@ impl Document {
         }
     }
 
-    // ---- motions ------------------------------------------------------
+    // ---- motions (pure: they compute a new cursor) ---------------------
 
     /// `h`: never leaves the line, like vim.
-    pub fn move_left(&mut self, count: usize) {
-        self.cursor.col = self.cursor.col.saturating_sub(count);
+    pub fn move_left(&self, cursor: Pos, count: usize) -> Pos {
+        Pos::new(cursor.line, cursor.col.saturating_sub(count))
     }
 
     /// `l`.
-    pub fn move_right(&mut self, count: usize) {
-        self.cursor.col = (self.cursor.col + count).min(self.line_len(self.cursor.line));
-        self.clamp_normal();
+    pub fn move_right(&self, cursor: Pos, count: usize) -> Pos {
+        let col = (cursor.col + count).min(self.line_len(cursor.line));
+        self.clamp_normal_pos(Pos::new(cursor.line, col))
     }
 
     /// `j`.
-    pub fn move_down(&mut self, count: usize) {
-        self.cursor.line = (self.cursor.line + count).min(self.line_count().saturating_sub(1));
-        self.clamp_normal();
+    pub fn move_down(&self, cursor: Pos, count: usize) -> Pos {
+        let line = (cursor.line + count).min(self.line_count().saturating_sub(1));
+        self.clamp_normal_pos(Pos::new(line, cursor.col))
     }
 
     /// `k`.
-    pub fn move_up(&mut self, count: usize) {
-        self.cursor.line = self.cursor.line.saturating_sub(count);
-        self.clamp_normal();
+    pub fn move_up(&self, cursor: Pos, count: usize) -> Pos {
+        self.clamp_normal_pos(Pos::new(cursor.line.saturating_sub(count), cursor.col))
     }
 
     /// `$`.
-    pub fn move_line_end(&mut self) {
-        self.cursor.col = self.line_len(self.cursor.line).saturating_sub(1);
+    pub fn move_line_end(&self, cursor: Pos) -> Pos {
+        Pos::new(cursor.line, self.line_len(cursor.line).saturating_sub(1))
     }
 
     /// `w`: start of the next word, crossing lines.
-    pub fn move_word_forward(&mut self, count: usize) {
+    pub fn move_word_forward(&self, cursor: Pos, count: usize) -> Pos {
+        let mut pos = cursor;
         for _ in 0..count.max(1) {
-            self.skip_space_forward();
-            if self.at_end_of_text() {
+            self.skip_space_forward(&mut pos);
+            if self.at_end_of_text(pos) {
                 break;
             }
-            let class = char_class(self.char_at(self.cursor).unwrap_or(' '));
-            while let Some(ch) = self.char_at(self.cursor) {
+            let class = char_class(self.char_at(pos).unwrap_or(' '));
+            while let Some(ch) = self.char_at(pos) {
                 if char_class(ch) != class {
                     break;
                 }
-                self.cursor.col += 1;
+                pos.col += 1;
             }
-            self.skip_space_forward();
+            self.skip_space_forward(&mut pos);
         }
-        self.clamp_normal();
+        self.clamp_normal_pos(pos)
     }
 
     /// `b`: start of the previous word, crossing lines.
-    pub fn move_word_backward(&mut self, count: usize) {
+    pub fn move_word_backward(&self, cursor: Pos, count: usize) -> Pos {
+        let mut pos = cursor;
         for _ in 0..count.max(1) {
-            if !self.step_back_one() {
+            if !self.step_back_one(&mut pos) {
                 break;
             }
-            self.skip_space_backward();
-            let class = match self.char_at(self.cursor) {
+            self.skip_space_backward(&mut pos);
+            let class = match self.char_at(pos) {
                 Some(ch) => char_class(ch),
                 None => continue,
             };
-            while self.cursor.col > 0 {
-                match self.char_at(Pos::new(self.cursor.line, self.cursor.col - 1)) {
-                    Some(prev) if char_class(prev) == class => self.cursor.col -= 1,
+            while pos.col > 0 {
+                match self.char_at(Pos::new(pos.line, pos.col - 1)) {
+                    Some(prev) if char_class(prev) == class => pos.col -= 1,
                     _ => break,
                 }
             }
         }
-        self.clamp_normal();
+        self.clamp_normal_pos(pos)
     }
 
     // ---- searching ----------------------------------------------------
@@ -588,22 +571,21 @@ impl Document {
 
     /// Move one character back, crossing to the end of the previous line. False at the start of
     /// the buffer.
-    fn step_back_one(&mut self) -> bool {
-        if self.cursor.col > 0 {
-            self.cursor.col -= 1;
+    fn step_back_one(&self, cursor: &mut Pos) -> bool {
+        if cursor.col > 0 {
+            cursor.col -= 1;
             true
-        } else if self.cursor.line > 0 {
-            self.cursor.line -= 1;
-            self.cursor.col = self.line_len(self.cursor.line).saturating_sub(1);
+        } else if cursor.line > 0 {
+            cursor.line -= 1;
+            cursor.col = self.line_len(cursor.line).saturating_sub(1);
             true
         } else {
             false
         }
     }
 
-    fn at_end_of_text(&self) -> bool {
-        self.cursor.line + 1 >= self.line_count()
-            && self.cursor.col >= self.line_len(self.cursor.line)
+    fn at_end_of_text(&self, cursor: Pos) -> bool {
+        cursor.line + 1 >= self.line_count() && cursor.col >= self.line_len(cursor.line)
     }
 
     fn char_at(&self, pos: Pos) -> Option<char> {
@@ -613,17 +595,17 @@ impl Document {
         Some(self.rope.line(pos.line).char(pos.col))
     }
 
-    fn skip_space_forward(&mut self) {
+    fn skip_space_forward(&self, cursor: &mut Pos) {
         loop {
-            match self.char_at(self.cursor) {
-                Some(ch) if ch.is_whitespace() => self.cursor.col += 1,
+            match self.char_at(*cursor) {
+                Some(ch) if ch.is_whitespace() => cursor.col += 1,
                 Some(_) => break,
                 None => {
-                    if self.cursor.line + 1 < self.line_count() {
-                        self.cursor.line += 1;
-                        self.cursor.col = 0;
+                    if cursor.line + 1 < self.line_count() {
+                        cursor.line += 1;
+                        cursor.col = 0;
                     } else {
-                        self.cursor.col = self.line_len(self.cursor.line);
+                        cursor.col = self.line_len(cursor.line);
                         break;
                     }
                 }
@@ -631,19 +613,18 @@ impl Document {
         }
     }
 
-    fn skip_space_backward(&mut self) {
+    fn skip_space_backward(&self, cursor: &mut Pos) {
         loop {
-            if self.cursor.col == 0 {
-                if self.cursor.line == 0 {
+            if cursor.col == 0 {
+                if cursor.line == 0 {
                     break;
                 }
-                self.cursor.line -= 1;
-                self.cursor.col = self.line_len(self.cursor.line);
+                cursor.line -= 1;
+                cursor.col = self.line_len(cursor.line);
                 continue;
             }
-            let prev = self.char_at(Pos::new(self.cursor.line, self.cursor.col - 1));
-            match prev {
-                Some(ch) if ch.is_whitespace() => self.cursor.col -= 1,
+            match self.char_at(Pos::new(cursor.line, cursor.col - 1)) {
+                Some(ch) if ch.is_whitespace() => cursor.col -= 1,
                 _ => break,
             }
         }
@@ -654,7 +635,6 @@ impl Document {
     pub fn replace_all(&mut self, text: &str) {
         self.rope = Rope::from_str(text);
         self.revision += 1;
-        self.cursor = self.clamp(self.cursor);
     }
 
     pub fn save(&mut self) -> io::Result<()> {
@@ -852,7 +832,8 @@ mod tests {
         assert_eq!(doc.line(0), "one");
         assert_eq!(doc.text(), "one\ntwo\n");
 
-        doc.insert_char('x');
+        let mut cursor = Pos::new(0, 0);
+        doc.insert_char(&mut cursor, 'x');
         doc.remove(Pos::new(0, 0), Pos::new(0, 1));
         assert!(doc.is_dirty());
         doc.save().unwrap();
@@ -883,7 +864,8 @@ mod tests {
         fs::write(&original, b"hello\n").unwrap();
 
         let mut doc = Document::open(&original).unwrap();
-        doc.insert_char('x');
+        let mut cursor = Pos::new(0, 0);
+        doc.insert_char(&mut cursor, 'x');
         doc.remove(Pos::new(0, 0), Pos::new(0, 1));
         doc.save_as(&copy).unwrap();
 
@@ -929,31 +911,32 @@ mod tests {
     #[test]
     fn insert_and_backspace_join_lines() {
         let mut doc = Document::from_text("ab\ncd");
-        doc.set_cursor(Pos::new(1, 0));
-        doc.backspace();
+        let mut cursor = Pos::new(1, 0);
+        doc.backspace(&mut cursor);
         assert_eq!(doc.text(), "abcd");
-        assert_eq!(doc.cursor(), Pos::new(0, 2));
+        assert_eq!(cursor, Pos::new(0, 2));
 
-        doc.insert_newline();
+        doc.insert_newline(&mut cursor);
         assert_eq!(doc.text(), "ab\ncd");
-        assert_eq!(doc.cursor(), Pos::new(1, 0));
+        assert_eq!(cursor, Pos::new(1, 0));
     }
 
     #[test]
     fn insert_char_advances_the_cursor() {
         let mut doc = Document::from_text("");
-        doc.insert_char('x');
-        doc.insert_char('y');
+        let mut cursor = Pos::new(0, 0);
+        doc.insert_char(&mut cursor, 'x');
+        doc.insert_char(&mut cursor, 'y');
         assert_eq!(doc.text(), "xy");
-        assert_eq!(doc.cursor(), Pos::new(0, 2));
+        assert_eq!(cursor, Pos::new(0, 2));
         assert!(doc.is_dirty());
     }
 
     #[test]
     fn delete_forward_removes_the_character_under_the_cursor() {
         let mut doc = Document::from_text("abc");
-        doc.set_cursor(Pos::new(0, 1));
-        doc.delete_forward();
+        let mut cursor = Pos::new(0, 1);
+        doc.delete_forward(&mut cursor);
         assert_eq!(doc.text(), "ac");
     }
 
@@ -970,30 +953,30 @@ mod tests {
 
     #[test]
     fn word_motions_cross_lines_and_skip_punctuation() {
-        let mut doc = Document::from_text("foo bar_baz\nqux(1)");
-        doc.set_cursor(Pos::new(0, 0));
-        doc.move_word_forward(1);
-        assert_eq!(doc.cursor(), Pos::new(0, 4));
-        doc.move_word_forward(1);
-        assert_eq!(doc.cursor(), Pos::new(1, 0));
-        doc.move_word_forward(1);
-        assert_eq!(doc.cursor(), Pos::new(1, 3));
-        doc.move_word_backward(1);
-        assert_eq!(doc.cursor(), Pos::new(1, 0));
-        doc.move_word_backward(1);
-        assert_eq!(doc.cursor(), Pos::new(0, 4));
+        let doc = Document::from_text("foo bar_baz\nqux(1)");
+        let cursor = Pos::new(0, 0);
+        let cursor = doc.move_word_forward(cursor, 1);
+        assert_eq!(cursor, Pos::new(0, 4));
+        let cursor = doc.move_word_forward(cursor, 1);
+        assert_eq!(cursor, Pos::new(1, 0));
+        let cursor = doc.move_word_forward(cursor, 1);
+        assert_eq!(cursor, Pos::new(1, 3));
+        let cursor = doc.move_word_backward(cursor, 1);
+        assert_eq!(cursor, Pos::new(1, 0));
+        let cursor = doc.move_word_backward(cursor, 1);
+        assert_eq!(cursor, Pos::new(0, 4));
     }
 
     #[test]
     fn vertical_motion_clamps_to_line_length() {
-        let mut doc = Document::from_text("longer line\nshort\n");
-        doc.set_cursor(Pos::new(0, 9));
-        doc.move_down(1);
-        assert_eq!(doc.cursor(), Pos::new(1, 4));
-        doc.move_down(5);
-        assert_eq!(doc.cursor(), Pos::new(1, 4));
-        doc.move_up(1);
-        assert_eq!(doc.cursor().line, 0);
+        let doc = Document::from_text("longer line\nshort\n");
+        let cursor = Pos::new(0, 9);
+        let cursor = doc.move_down(cursor, 1);
+        assert_eq!(cursor, Pos::new(1, 4));
+        let cursor = doc.move_down(cursor, 5);
+        assert_eq!(cursor, Pos::new(1, 4));
+        let cursor = doc.move_up(cursor, 1);
+        assert_eq!(cursor.line, 0);
     }
 
     #[test]
@@ -1016,38 +999,45 @@ mod tests {
     #[test]
     fn undo_and_redo_walk_the_history() {
         let mut doc = Document::from_text("one\n");
-        doc.checkpoint();
-        doc.insert_char('X');
+        let mut cursor = Pos::new(0, 0);
+        doc.checkpoint(cursor);
+        doc.insert_char(&mut cursor, 'X');
         assert_eq!(doc.text(), "Xone\n");
 
-        assert!(doc.undo());
+        let restored = doc.undo(cursor).expect("one undo step");
         assert_eq!(doc.text(), "one\n");
-        assert!(!doc.undo(), "history is exhausted");
+        assert_eq!(restored, Pos::new(0, 0));
+        assert!(doc.undo(restored).is_none(), "history is exhausted");
 
-        assert!(doc.redo());
+        let redone = doc.redo(restored).expect("one redo step");
         assert_eq!(doc.text(), "Xone\n");
-        assert!(!doc.redo());
+        assert!(doc.redo(redone).is_none());
     }
 
     #[test]
     fn undoing_back_to_the_saved_text_makes_the_buffer_clean() {
         let mut doc = Document::from_text("clean\n");
-        doc.checkpoint();
-        doc.insert_char('X');
+        let mut cursor = Pos::new(0, 0);
+        doc.checkpoint(cursor);
+        doc.insert_char(&mut cursor, 'X');
         assert!(doc.is_dirty());
-        doc.undo();
+        doc.undo(cursor).expect("undo");
         assert!(!doc.is_dirty(), "undoing back to the saved text is not a change");
     }
 
     #[test]
     fn a_new_change_clears_the_redo_stack() {
         let mut doc = Document::from_text("a\n");
-        doc.checkpoint();
-        doc.insert_char('b');
-        doc.undo();
-        doc.checkpoint();
-        doc.insert_char('c');
-        assert!(!doc.redo(), "a new change must drop the old redo path");
+        let mut cursor = Pos::new(0, 0);
+        doc.checkpoint(cursor);
+        doc.insert_char(&mut cursor, 'b');
+        cursor = doc.undo(cursor).expect("undo");
+        doc.checkpoint(cursor);
+        doc.insert_char(&mut cursor, 'c');
+        assert!(
+            doc.redo(cursor).is_none(),
+            "a new change must drop the old redo path"
+        );
     }
 
     #[test]

@@ -33,6 +33,14 @@ struct Search {
     origin_scroll: usize,
 }
 
+/// Where one view of a buffer is looking. Cursors and scrolling belong to the view, not the text:
+/// two windows on the same file each keep their own position.
+#[derive(Debug, Clone, Copy, Default)]
+struct Window {
+    cursor: Pos,
+    scroll: usize,
+}
+
 /// A `c` substitute walking through its matches, collecting decisions before touching the buffer.
 #[derive(Debug)]
 struct Replacer {
@@ -82,8 +90,8 @@ pub struct App {
     active: usize,
     input: InputState,
     register: Option<Register>,
-    /// First buffer line drawn on screen; kept by [`App::follow_cursor`].
-    scroll: usize,
+    /// The single view until splits arrive, holding its own cursor and scroll.
+    window: Window,
     /// Whether the current insert session has taken its undo checkpoint yet.
     insert_started: bool,
     search: Option<Search>,
@@ -110,7 +118,7 @@ impl App {
             active: 0,
             input: InputState::default(),
             register: None,
-            scroll: 0,
+            window: Window::default(),
             insert_started: false,
             search: None,
             replacer: None,
@@ -136,6 +144,35 @@ impl App {
         &mut self.buffers[self.active]
     }
 
+    /// Cursor of the focused view.
+    pub fn cursor(&self) -> Pos {
+        self.window.cursor
+    }
+
+    /// Move the focused cursor, clamped into the buffer.
+    fn set_cursor(&mut self, pos: Pos) {
+        let clamped = self.document().clamp_pos(pos);
+        self.window.cursor = clamped;
+    }
+
+    /// Keep the cursor on a character in normal mode.
+    fn clamp_cursor(&mut self) {
+        let clamped = self.document().clamp_normal_pos(self.window.cursor);
+        self.window.cursor = clamped;
+    }
+
+    fn motion(&mut self, f: impl FnOnce(&Document, Pos) -> Pos) {
+        let next = f(self.document(), self.window.cursor);
+        self.set_cursor(next);
+    }
+
+    fn edit(&mut self, f: impl FnOnce(&mut Document, &mut Pos)) {
+        let mut cursor = self.window.cursor;
+        f(self.doc_mut(), &mut cursor);
+        let clamped = self.document().clamp_pos(cursor);
+        self.window.cursor = clamped;
+    }
+
     /// Every open buffer, in tab order.
     pub fn buffers(&self) -> &[Document] {
         &self.buffers
@@ -149,7 +186,7 @@ impl App {
         if idx < self.buffers.len() {
             self.active = idx;
             self.input = InputState::default();
-            self.scroll = 0;
+            self.window.scroll = 0;
         }
     }
 
@@ -190,11 +227,11 @@ impl App {
             self.active = self.active.min(self.buffers.len() - 1);
         }
         self.input = InputState::default();
-        self.scroll = 0;
+        self.window.scroll = 0;
     }
 
     pub fn scroll(&self) -> usize {
-        self.scroll
+        self.window.scroll
     }
 
     pub fn command_line(&self) -> &str {
@@ -241,7 +278,7 @@ impl App {
             MATCH_SCAN_LINES,
             MATCH_COUNT_CAP,
         );
-        let cursor = self.document().cursor();
+        let cursor = self.cursor();
         let index = matches
             .iter()
             .position(|pos| *pos == cursor)
@@ -299,12 +336,12 @@ impl App {
         if visible == 0 {
             return;
         }
-        let line = self.document().cursor().line;
+        let line = self.cursor().line;
         let margin = 2.min(visible / 2);
-        if line < self.scroll + margin {
-            self.scroll = line.saturating_sub(margin);
-        } else if line + margin >= self.scroll + visible {
-            self.scroll = (line + margin + 1).saturating_sub(visible);
+        if line < self.window.scroll + margin {
+            self.window.scroll = line.saturating_sub(margin);
+        } else if line + margin >= self.window.scroll + visible {
+            self.window.scroll = (line + margin + 1).saturating_sub(visible);
         }
     }
 
@@ -346,7 +383,7 @@ impl App {
             self.active = self.buffers.len() - 1;
         }
         self.input = InputState::default();
-        self.scroll = 0;
+        self.window.scroll = 0;
     }
 
     /// True when the active buffer is the untouched `[No Name]` start-up buffer, which a newly
@@ -459,18 +496,20 @@ impl App {
     fn handle_normal_command(&mut self, key: KeyEvent) {
         let had_count = self.input.count.is_some();
         let count = self.input.take_count();
-        let cursor = self.document().cursor();
+        let cursor = self.cursor();
         match key.code {
-            KeyCode::Char('h') | KeyCode::Left => self.doc_mut().move_left(count),
-            KeyCode::Char('j') | KeyCode::Down => self.doc_mut().move_down(count),
-            KeyCode::Char('k') | KeyCode::Up => self.doc_mut().move_up(count),
-            KeyCode::Char('l') | KeyCode::Right => self.doc_mut().move_right(count),
-            KeyCode::Char('w') => self.doc_mut().move_word_forward(count),
-            KeyCode::Char('b') => self.doc_mut().move_word_backward(count),
+            KeyCode::Char('h') | KeyCode::Left => self.motion(|doc, c| doc.move_left(c, count)),
+            KeyCode::Char('j') | KeyCode::Down => self.motion(|doc, c| doc.move_down(c, count)),
+            KeyCode::Char('k') | KeyCode::Up => self.motion(|doc, c| doc.move_up(c, count)),
+            KeyCode::Char('l') | KeyCode::Right => self.motion(|doc, c| doc.move_right(c, count)),
+            KeyCode::Char('w') => self.motion(|doc, c| doc.move_word_forward(c, count)),
+            KeyCode::Char('b') => self.motion(|doc, c| doc.move_word_backward(c, count)),
             KeyCode::Home | KeyCode::Char('0') => {
-                self.doc_mut().set_cursor(Pos::new(cursor.line, 0));
+                self.set_cursor(Pos::new(cursor.line, 0));
             }
-            KeyCode::End | KeyCode::Char('$') => self.doc_mut().move_line_end(),
+            KeyCode::End | KeyCode::Char('$') => {
+                self.motion(|doc, c| doc.move_line_end(c))
+            }
             KeyCode::Char('G') => {
                 let line = if had_count {
                     count
@@ -486,26 +525,28 @@ impl App {
                 self.enter_insert();
             }
             KeyCode::Char('I') => {
-                self.doc_mut().set_cursor(Pos::new(cursor.line, 0));
+                self.set_cursor(Pos::new(cursor.line, 0));
                 self.enter_insert();
             }
             KeyCode::Char('A') => {
                 let end = self.document().line_len(cursor.line);
-                self.doc_mut().set_cursor(Pos::new(cursor.line, end));
+                self.set_cursor(Pos::new(cursor.line, end));
                 self.enter_insert();
             }
             KeyCode::Char('o') => {
                 self.checkpoint();
                 self.insert_started = true;
                 let end = self.document().line_len(cursor.line);
-                self.doc_mut().set_cursor(Pos::new(cursor.line, end));
-                self.doc_mut().insert_newline();
+                self.set_cursor(Pos::new(cursor.line, end));
+                self.edit(|doc, c| doc.insert_newline(c));
                 self.enter_insert();
             }
             KeyCode::Char('O') => {
-                self.doc_mut().set_cursor(Pos::new(cursor.line, 0));
-                self.doc_mut().insert_newline();
-                self.doc_mut().set_cursor(Pos::new(cursor.line, 0));
+                self.checkpoint();
+                self.insert_started = true;
+                self.set_cursor(Pos::new(cursor.line, 0));
+                self.edit(|doc, c| doc.insert_newline(c));
+                self.set_cursor(Pos::new(cursor.line, 0));
                 self.enter_insert();
             }
             KeyCode::Char('x') => self.delete_under_cursor(count),
@@ -527,41 +568,50 @@ impl App {
     }
 
     fn checkpoint(&mut self) {
-        self.doc_mut().checkpoint();
+        let cursor = self.cursor();
+        self.doc_mut().checkpoint(cursor);
     }
 
     fn undo(&mut self) {
-        if self.doc_mut().undo() {
-            self.message = None;
-            self.doc_mut().clamp_normal();
-        } else {
-            self.message = Some("already at the oldest change".to_owned());
+        let cursor = self.cursor();
+        match self.doc_mut().undo(cursor) {
+            Some(restored) => {
+                self.message = None;
+                self.set_cursor(restored);
+                self.clamp_cursor();
+            }
+            None => self.message = Some("already at the oldest change".to_owned()),
         }
     }
 
     fn redo(&mut self) {
-        if self.doc_mut().redo() {
-            self.message = None;
-            self.doc_mut().clamp_normal();
-        } else {
-            self.message = Some("nothing to redo".to_owned());
+        let cursor = self.cursor();
+        match self.doc_mut().redo(cursor) {
+            Some(restored) => {
+                self.message = None;
+                self.set_cursor(restored);
+                self.clamp_cursor();
+            }
+            None => self.message = Some("nothing to redo".to_owned()),
         }
     }
 
     fn jump_to_line(&mut self, line: usize) {
-        let target = line.saturating_sub(1).min(self.document().line_count().saturating_sub(1));
-        self.doc_mut().set_cursor(Pos::new(target, 0));
-        self.doc_mut().clamp_normal();
+        let target = line
+            .saturating_sub(1)
+            .min(self.document().line_count().saturating_sub(1));
+        self.set_cursor(Pos::new(target, 0));
+        self.clamp_cursor();
     }
 
     fn move_cursor_right(&mut self, count: usize) {
-        let cursor = self.document().cursor();
+        let cursor = self.cursor();
         let col = (cursor.col + count).min(self.document().line_len(cursor.line));
-        self.doc_mut().set_cursor(Pos::new(cursor.line, col));
+        self.set_cursor(Pos::new(cursor.line, col));
     }
 
     fn delete_under_cursor(&mut self, count: usize) {
-        let cursor = self.document().cursor();
+        let cursor = self.cursor();
         let at_last_char = cursor.col >= self.document().line_len(cursor.line)
             && cursor.line + 1 >= self.document().line_count();
         if at_last_char {
@@ -570,7 +620,7 @@ impl App {
         self.checkpoint();
         let mut removed = String::new();
         for _ in 0..count.max(1) {
-            let cursor = self.document().cursor();
+            let cursor = self.cursor();
             let len = self.document().line_len(cursor.line);
             let end = if cursor.col < len {
                 Pos::new(cursor.line, cursor.col + 1)
@@ -580,7 +630,7 @@ impl App {
                 break;
             };
             removed.push_str(&self.doc_mut().remove(cursor, end));
-            self.doc_mut().set_cursor(cursor);
+            self.set_cursor(cursor);
         }
         if !removed.is_empty() {
             self.register = Some(Register {
@@ -634,7 +684,7 @@ impl App {
                     text,
                     linewise: false,
                 });
-                self.doc_mut().set_cursor(start);
+                self.set_cursor(start);
             }
             Operator::Delete => {
                 self.doc_mut().remove(start, end);
@@ -642,8 +692,8 @@ impl App {
                     text,
                     linewise: false,
                 });
-                self.doc_mut().set_cursor(start);
-                self.doc_mut().clamp_normal();
+                self.set_cursor(start);
+                self.clamp_cursor();
             }
             Operator::Change => {
                 self.doc_mut().remove(start, end);
@@ -651,7 +701,7 @@ impl App {
                     text,
                     linewise: false,
                 });
-                self.doc_mut().set_cursor(start);
+                self.set_cursor(start);
                 self.enter_insert();
             }
         }
@@ -660,36 +710,17 @@ impl App {
     /// The half-open range an operator would touch if followed by `code`, found by running the
     /// motion on a copy of the buffer.
     fn operator_range(&self, code: KeyCode, count: usize) -> Option<(Pos, Pos)> {
-        let start = self.document().cursor();
-        let mut probe = self.document().clone();
-        let inclusive = match code {
-            KeyCode::Char('h') | KeyCode::Left => {
-                probe.move_left(count);
-                false
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                probe.move_right(count);
-                false
-            }
-            KeyCode::Char('w') => {
-                probe.move_word_forward(count);
-                false
-            }
-            KeyCode::Char('b') => {
-                probe.move_word_backward(count);
-                false
-            }
-            KeyCode::Char('0') | KeyCode::Home => {
-                probe.set_cursor(Pos::new(start.line, 0));
-                false
-            }
-            KeyCode::Char('$') | KeyCode::End => {
-                probe.move_line_end();
-                true
-            }
+        let start = self.cursor();
+        let doc = self.document();
+        let (target, inclusive) = match code {
+            KeyCode::Char('h') | KeyCode::Left => (doc.move_left(start, count), false),
+            KeyCode::Char('l') | KeyCode::Right => (doc.move_right(start, count), false),
+            KeyCode::Char('w') => (doc.move_word_forward(start, count), false),
+            KeyCode::Char('b') => (doc.move_word_backward(start, count), false),
+            KeyCode::Char('0') | KeyCode::Home => (Pos::new(start.line, 0), false),
+            KeyCode::Char('$') | KeyCode::End => (doc.move_line_end(start), true),
             _ => return None,
         };
-        let target = probe.cursor();
         let (a, b) = ordered(start, target);
         if inclusive {
             Some((a, Pos::new(b.line, b.col + 1)))
@@ -699,7 +730,7 @@ impl App {
     }
 
     fn apply_linewise(&mut self, op: Operator, count: usize) {
-        let line = self.document().cursor().line;
+        let line = self.cursor().line;
         let available = self.document().line_count().saturating_sub(line);
         let n = count.min(available.max(1));
 
@@ -730,7 +761,7 @@ impl App {
                     self.doc_mut().delete_line(line);
                 }
                 self.doc_mut().insert_lines(line, &[String::new()]);
-                self.doc_mut().set_cursor(Pos::new(line, 0));
+                self.set_cursor(Pos::new(line, 0));
                 self.register = Some(Register {
                     text,
                     linewise: true,
@@ -749,15 +780,15 @@ impl App {
         if register.linewise {
             let lines: Vec<String> = register.text.split('\n').map(str::to_owned).collect();
             let at = if before {
-                self.document().cursor().line
+                self.cursor().line
             } else {
-                self.document().cursor().line + 1
+                self.cursor().line + 1
             };
             self.doc_mut().insert_lines(at, &lines);
-            self.doc_mut().set_cursor(Pos::new(at, 0));
-            self.doc_mut().clamp_normal();
+            self.set_cursor(Pos::new(at, 0));
+            self.clamp_cursor();
         } else {
-            let mut pos = self.document().cursor();
+            let mut pos = self.cursor();
             if !before && pos.col < self.document().line_len(pos.line) {
                 pos.col += 1;
             }
@@ -772,8 +803,8 @@ impl App {
                     col += 1;
                 }
             }
-            self.doc_mut().set_cursor(Pos::new(line, col));
-            self.doc_mut().clamp_normal();
+            self.set_cursor(Pos::new(line, col));
+            self.clamp_cursor();
         }
     }
 
@@ -783,8 +814,8 @@ impl App {
     fn start_search(&mut self) {
         self.search = Some(Search {
             query: String::new(),
-            origin: self.document().cursor(),
-            origin_scroll: self.scroll,
+            origin: self.cursor(),
+            origin_scroll: self.window.scroll,
         });
         self.mode = Mode::Search;
         self.message = None;
@@ -817,8 +848,8 @@ impl App {
     /// Give up the search: back to where `/` was pressed, highlight gone.
     fn cancel_search(&mut self) {
         if let Some(search) = self.search.take() {
-            self.doc_mut().set_cursor(search.origin);
-            self.scroll = search.origin_scroll;
+            self.set_cursor(search.origin);
+            self.window.scroll = search.origin_scroll;
         }
         self.mode = Mode::Normal;
     }
@@ -829,7 +860,7 @@ impl App {
             return;
         };
         if search.query.is_empty() {
-            self.doc_mut().set_cursor(search.origin);
+            self.set_cursor(search.origin);
             self.message = None;
             return;
         }
@@ -853,7 +884,7 @@ impl App {
             return;
         }
         let case_sensitive = is_case_sensitive(&query);
-        let from = self.next_position(self.document().cursor());
+        let from = self.next_position(self.cursor());
         let found = self
             .document()
             .find_forward(from, &query, case_sensitive)
@@ -870,7 +901,7 @@ impl App {
             return;
         }
         let case_sensitive = is_case_sensitive(&query);
-        let cursor = self.document().cursor();
+        let cursor = self.cursor();
         let from = match self.previous_position(cursor) {
             Some(pos) => pos,
             None => return self.report_match(None, &query),
@@ -891,7 +922,7 @@ impl App {
     fn report_match(&mut self, found: Option<Pos>, query: &str) {
         match found {
             Some(pos) => {
-                self.doc_mut().set_cursor(pos);
+                self.set_cursor(pos);
                 self.message = None;
             }
             None => self.message = Some(format!("no match: {query}")),
@@ -928,7 +959,7 @@ impl App {
         let from_line = if spec.whole_file {
             0
         } else {
-            self.document().cursor().line
+            self.cursor().line
         };
         let max_lines = if spec.whole_file {
             self.document().line_count()
@@ -961,7 +992,7 @@ impl App {
         }
 
         if spec.confirm {
-            self.doc_mut().set_cursor(matches[0]);
+            self.set_cursor(matches[0]);
             self.message = None;
             self.replacer = Some(Replacer {
                 spec,
@@ -975,7 +1006,7 @@ impl App {
 
         let total = matches.len();
         let done = self.apply_replacements(&spec, &matches);
-        self.doc_mut().set_cursor(matches[0]);
+        self.set_cursor(matches[0]);
         self.message = Some(format!("replaced {done} of {total} occurrences"));
         Outcome::Continue
     }
@@ -1046,7 +1077,7 @@ impl App {
 
         if replacer.index < replacer.matches.len() {
             let next = replacer.matches[replacer.index];
-            self.doc_mut().set_cursor(next);
+            self.set_cursor(next);
             self.replacer = Some(replacer);
         } else {
             self.replacer = Some(replacer);
@@ -1063,7 +1094,7 @@ impl App {
         let total = replacer.matches.len();
         let done = self.apply_replacements(&replacer.spec, &replacer.approved);
         if let Some(pos) = replacer.approved.first().or_else(|| replacer.matches.first()) {
-            self.doc_mut().set_cursor(*pos);
+            self.set_cursor(*pos);
         }
         self.message = Some(format!("replaced {done} of {total} occurrences"));
     }
@@ -1085,22 +1116,27 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
-                let cursor = self.document().cursor();
+                let cursor = self.cursor();
                 if cursor.col > 0 {
                     let back = Pos::new(cursor.line, cursor.col - 1);
-                    self.doc_mut().set_cursor(back);
+                    self.set_cursor(back);
                 }
-                self.doc_mut().clamp_normal();
+                self.clamp_cursor();
             }
-            KeyCode::Enter => self.doc_mut().insert_newline(),
-            KeyCode::Tab => self.doc_mut().insert_char('\t'),
-            KeyCode::Backspace => self.doc_mut().backspace(),
-            KeyCode::Delete => self.doc_mut().delete_forward(),
-            KeyCode::Left => self.doc_mut().move_left(1),
-            KeyCode::Right => self.move_cursor_right(1),
-            KeyCode::Up => self.doc_mut().move_up(1),
-            KeyCode::Down => self.doc_mut().move_down(1),
-            KeyCode::Char(c) => self.doc_mut().insert_char(c),
+            KeyCode::Enter => self.edit(|doc, cursor| doc.insert_newline(cursor)),
+            KeyCode::Tab => self.edit(|doc, cursor| doc.insert_char(cursor, '\t')),
+            KeyCode::Backspace => self.edit(|doc, cursor| doc.backspace(cursor)),
+            KeyCode::Delete => self.edit(|doc, cursor| doc.delete_forward(cursor)),
+            // arrows stay inside the line, like normal-mode `h`/`l`
+            KeyCode::Left => self.motion(|doc, cursor| doc.move_left(cursor, 1)),
+            KeyCode::Right => {
+                let cursor = self.cursor();
+                let col = (cursor.col + 1).min(self.document().line_len(cursor.line));
+                self.set_cursor(Pos::new(cursor.line, col));
+            }
+            KeyCode::Up => self.motion(|doc, cursor| doc.move_up(cursor, 1)),
+            KeyCode::Down => self.motion(|doc, cursor| doc.move_down(cursor, 1)),
+            KeyCode::Char(c) => self.edit(|doc, cursor| doc.insert_char(cursor, c)),
             _ => {}
         }
         Outcome::Continue
@@ -1486,22 +1522,22 @@ mod tests {
     fn hjkl_moves_the_cursor() {
         let mut app = app_with("abc\ndef\n");
         keys(&mut app, "ll");
-        assert_eq!(app.document().cursor(), Pos::new(0, 2));
+        assert_eq!(app.cursor(), Pos::new(0, 2));
         keys(&mut app, "j");
-        assert_eq!(app.document().cursor(), Pos::new(1, 2));
+        assert_eq!(app.cursor(), Pos::new(1, 2));
         keys(&mut app, "h");
-        assert_eq!(app.document().cursor(), Pos::new(1, 1));
+        assert_eq!(app.cursor(), Pos::new(1, 1));
         keys(&mut app, "k");
-        assert_eq!(app.document().cursor(), Pos::new(0, 1));
+        assert_eq!(app.cursor(), Pos::new(0, 1));
     }
 
     #[test]
     fn counts_repeat_motions() {
         let mut app = app_with("abcdef\n");
         keys(&mut app, "4l");
-        assert_eq!(app.document().cursor(), Pos::new(0, 4));
+        assert_eq!(app.cursor(), Pos::new(0, 4));
         keys(&mut app, "2h");
-        assert_eq!(app.document().cursor(), Pos::new(0, 2));
+        assert_eq!(app.cursor(), Pos::new(0, 2));
     }
 
     #[test]
@@ -1586,11 +1622,11 @@ mod tests {
     fn gg_and_capital_g_jump_to_the_ends() {
         let mut app = app_with("1\n2\n3\n4\n");
         keys(&mut app, "G");
-        assert_eq!(app.document().cursor(), Pos::new(3, 0));
+        assert_eq!(app.cursor(), Pos::new(3, 0));
         keys(&mut app, "gg");
-        assert_eq!(app.document().cursor(), Pos::new(0, 0));
+        assert_eq!(app.cursor(), Pos::new(0, 0));
         keys(&mut app, "3G");
-        assert_eq!(app.document().cursor(), Pos::new(2, 0));
+        assert_eq!(app.cursor(), Pos::new(2, 0));
     }
 
     #[test]
@@ -1612,8 +1648,8 @@ mod tests {
         keys(&mut app, "30j");
         app.follow_cursor(10);
         assert!(app.scroll() > 0);
-        assert!(app.document().cursor().line < app.scroll() + 10);
-        assert!(app.document().cursor().line >= app.scroll());
+        assert!(app.cursor().line < app.scroll() + 10);
+        assert!(app.cursor().line >= app.scroll());
     }
 
     #[test]
@@ -1858,7 +1894,7 @@ mod tests {
         let mut app = app_with("one\ntwo beta\nbeta three\n");
         search(&mut app, "beta");
         assert_eq!(app.mode(), Mode::Search);
-        assert_eq!(app.document().cursor(), Pos::new(1, 4));
+        assert_eq!(app.cursor(), Pos::new(1, 4));
         assert_eq!(app.search_progress(), Some((1, 2, false)));
 
         enter(&mut app);
@@ -1866,20 +1902,20 @@ mod tests {
         assert!(app.search_highlight().is_some());
 
         keys(&mut app, "n");
-        assert_eq!(app.document().cursor(), Pos::new(2, 0));
+        assert_eq!(app.cursor(), Pos::new(2, 0));
         assert_eq!(app.search_progress().unwrap().0, 2);
         keys(&mut app, "N");
-        assert_eq!(app.document().cursor(), Pos::new(1, 4));
+        assert_eq!(app.cursor(), Pos::new(1, 4));
     }
 
     #[test]
     fn escape_cancels_search_and_restores_the_cursor() {
         let mut app = app_with("one\nbeta\n");
         search(&mut app, "beta");
-        assert_eq!(app.document().cursor(), Pos::new(1, 0));
+        assert_eq!(app.cursor(), Pos::new(1, 0));
         esc(&mut app);
         assert_eq!(app.mode(), Mode::Normal);
-        assert_eq!(app.document().cursor(), Pos::new(0, 0));
+        assert_eq!(app.cursor(), Pos::new(0, 0));
         assert!(app.search_highlight().is_none());
         assert!(app.search_progress().is_none());
     }
@@ -1890,9 +1926,9 @@ mod tests {
         search(&mut app, "beta");
         enter(&mut app);
         keys(&mut app, "n");
-        assert_eq!(app.document().cursor(), Pos::new(1, 0));
+        assert_eq!(app.cursor(), Pos::new(1, 0));
         keys(&mut app, "n");
-        assert_eq!(app.document().cursor(), Pos::new(0, 0), "wraps around");
+        assert_eq!(app.cursor(), Pos::new(0, 0), "wraps around");
 
         esc(&mut app);
         search(&mut app, "zzz");

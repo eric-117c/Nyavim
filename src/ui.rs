@@ -62,7 +62,7 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
     let doc = app.document();
-    let cursor = doc.cursor();
+    let cursor = app.cursor();
     let height = area.height as usize;
     let number_width = digits(doc.line_count()).max(3);
 
@@ -160,7 +160,7 @@ fn flush(spans: &mut Vec<Span<'static>>, run: &mut String, style: Option<Style>)
 
 fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
     let doc = app.document();
-    let cursor = doc.cursor();
+    let cursor = app.cursor();
     let mode = Span::styled(
         format!(" {} ", app.mode().label()),
         Style::default()
