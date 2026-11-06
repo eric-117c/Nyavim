@@ -47,6 +47,46 @@ impl Layout {
         }
     }
 
+    /// The separator cells implied by every split, for drawing.
+    pub fn separators(&self, area: Rect, out: &mut Vec<(SplitDir, Rect)>) {
+        if let Layout::Split { dir, first, second } = self {
+            let (a, b) = divide(area, *dir);
+            out.push(match dir {
+                SplitDir::SideBySide => (
+                    SplitDir::SideBySide,
+                    Rect {
+                        x: a.x + a.width,
+                        y: area.y,
+                        width: 1,
+                        height: area.height,
+                    },
+                ),
+                SplitDir::Stacked => (
+                    SplitDir::Stacked,
+                    Rect {
+                        x: area.x,
+                        y: a.y + a.height,
+                        width: area.width,
+                        height: 1,
+                    },
+                ),
+            });
+            first.separators(a, out);
+            second.separators(b, out);
+        }
+    }
+
+    /// Rewrite every leaf id through `f`, keeping the tree shape. Used when a window index shifts.
+    pub fn remap(&mut self, f: &dyn Fn(usize) -> usize) {
+        match self {
+            Layout::Leaf(window) => *window = f(*window),
+            Layout::Split { first, second, .. } => {
+                first.remap(f);
+                second.remap(f);
+            }
+        }
+    }
+
     /// Replace `window`'s leaf with a split of the old window and `new_window`.
     pub fn split_leaf(&mut self, window: usize, dir: SplitDir, new_window: usize) -> bool {
         match self {
@@ -276,6 +316,27 @@ mod tests {
     fn the_last_window_cannot_be_removed() {
         let mut layout = Layout::leaf(0);
         assert!(!layout.remove_leaf(0));
+    }
+
+    #[test]
+    fn separators_sit_between_the_halves() {
+        let mut layout = Layout::leaf(0);
+        layout.split_leaf(0, SplitDir::SideBySide, 1);
+        let mut separators = Vec::new();
+        layout.separators(area(), &mut separators);
+        assert_eq!(separators.len(), 1);
+        let (dir, rect) = separators[0];
+        assert_eq!(dir, SplitDir::SideBySide);
+        assert_eq!(rect.width, 1);
+        assert_eq!(rect.x, 9);
+    }
+
+    #[test]
+    fn remap_keeps_the_tree_shape() {
+        let mut layout = Layout::leaf(3);
+        layout.split_leaf(3, SplitDir::Stacked, 5);
+        layout.remap(&|id| id - 1);
+        assert_eq!(layout.leaves(), vec![2, 4]);
     }
 
     #[test]

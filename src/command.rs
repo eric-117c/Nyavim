@@ -84,6 +84,30 @@ pub const COMMANDS: &[Command] = &[
         keys: ":e <path>",
     },
     Command {
+        name: "split",
+        aliases: &["sp"],
+        description: "Split this window, one above the other",
+        keys: ":sp",
+    },
+    Command {
+        name: "vsplit",
+        aliases: &["vsp"],
+        description: "Split this window side by side",
+        keys: ":vsp",
+    },
+    Command {
+        name: "close-window",
+        aliases: &["cl", "close"],
+        description: "Close this window; the file stays open",
+        keys: ":close  Ctrl+W c",
+    },
+    Command {
+        name: "only-window",
+        aliases: &["only"],
+        description: "Close every other window",
+        keys: ":only  Ctrl+W o",
+    },
+    Command {
         name: "next-buffer",
         aliases: &["bn"],
         description: "Show the next open file",
@@ -136,6 +160,9 @@ pub const KEYS: &[(&str, &str)] = &[
     (":", "command line"),
     ("Ctrl+K", "command palette"),
     ("Ctrl+N Ctrl+P", "next / previous open file"),
+    (":sp :vsp", "split this window above/below or side by side"),
+    ("Ctrl+W h j k l", "move focus to the window in that direction"),
+    ("Ctrl+W w c o", "cycle windows, close this one, close the others"),
     ("F1", "this page"),
     ("Ctrl+Q", "quit"),
 ];

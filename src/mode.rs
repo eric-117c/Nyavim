@@ -14,6 +14,8 @@ pub enum Mode {
     Search,
     /// `:%s/…/c` asking about one match at a time.
     ReplaceConfirm,
+    /// `Ctrl+W` waiting for a window command.
+    WindowCmd,
 }
 
 impl Mode {
@@ -27,6 +29,7 @@ impl Mode {
             Mode::Help => "HELP",
             Mode::Search => "SEARCH",
             Mode::ReplaceConfirm => "REPLACE",
+            Mode::WindowCmd => "WINDOW",
         }
     }
 }
@@ -45,6 +48,7 @@ mod tests {
             Mode::Help.label(),
             Mode::Search.label(),
             Mode::ReplaceConfirm.label(),
+            Mode::WindowCmd.label(),
         ];
         for (i, a) in labels.iter().enumerate() {
             for b in &labels[i + 1..] {

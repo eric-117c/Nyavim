@@ -3,6 +3,7 @@
 mod app;
 mod command;
 mod document;
+mod layout;
 mod mode;
 mod ui;
 
@@ -69,7 +70,15 @@ fn restore_terminal_direct() -> io::Result<()> {
 
 fn run(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
     loop {
-        let visible = terminal.size()?.height.saturating_sub(HINT_ROWS) as usize;
+        let size = terminal.size()?;
+        app.set_area(size.width, size.height);
+        let focus = app.focused_window();
+        let visible = app
+            .window_rects()
+            .iter()
+            .find(|(id, _)| *id == focus)
+            .map(|(_, rect)| rect.height as usize)
+            .unwrap_or(size.height.saturating_sub(HINT_ROWS) as usize);
         app.follow_cursor(visible);
         terminal.draw(|frame| ui::draw(frame, app))?;
 

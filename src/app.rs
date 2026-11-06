@@ -5,8 +5,10 @@
 use std::path::Path;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
 
 use crate::command::{self, Command, Substitute};
+use crate::layout::{self, Layout, SplitDir};
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
 use crate::mode::Mode;
 
@@ -36,9 +38,11 @@ struct Search {
 /// Where one view of a buffer is looking. Cursors and scrolling belong to the view, not the text:
 /// two windows on the same file each keep their own position.
 #[derive(Debug, Clone, Copy, Default)]
-struct Window {
-    cursor: Pos,
-    scroll: usize,
+pub struct Window {
+    /// Index into [`App::buffers`].
+    pub buffer: usize,
+    pub cursor: Pos,
+    pub scroll: usize,
 }
 
 /// A `c` substitute walking through its matches, collecting decisions before touching the buffer.
@@ -87,11 +91,14 @@ pub struct App {
     /// Message shown next to the mode indicator, e.g. a refused save.
     message: Option<String>,
     buffers: Vec<Document>,
-    active: usize,
+    /// One entry per pane; the layout tree decides where each is drawn.
+    windows: Vec<Window>,
+    layout: Layout,
+    focus: usize,
+    /// Terminal area, updated by the main loop so focus movement can reason about geometry.
+    area: Rect,
     input: InputState,
     register: Option<Register>,
-    /// The single view until splits arrive, holding its own cursor and scroll.
-    window: Window,
     /// Whether the current insert session has taken its undo checkpoint yet.
     insert_started: bool,
     search: Option<Search>,
@@ -115,10 +122,12 @@ impl App {
             mode: Mode::Normal,
             message: None,
             buffers: vec![Document::empty()],
-            active: 0,
+            windows: vec![Window::default()],
+            layout: Layout::leaf(0),
+            focus: 0,
+            area: Rect::new(0, 0, 80, 24),
             input: InputState::default(),
             register: None,
-            window: Window::default(),
             insert_started: false,
             search: None,
             replacer: None,
@@ -137,40 +146,141 @@ impl App {
     }
 
     pub fn document(&self) -> &Document {
-        &self.buffers[self.active]
+        &self.buffers[self.windows[self.focus].buffer]
     }
 
     fn doc_mut(&mut self) -> &mut Document {
-        &mut self.buffers[self.active]
+        let idx = self.windows[self.focus].buffer;
+        &mut self.buffers[idx]
     }
 
     /// Cursor of the focused view.
     pub fn cursor(&self) -> Pos {
-        self.window.cursor
+        self.windows[self.focus].cursor
     }
 
     /// Move the focused cursor, clamped into the buffer.
     fn set_cursor(&mut self, pos: Pos) {
         let clamped = self.document().clamp_pos(pos);
-        self.window.cursor = clamped;
+        self.windows[self.focus].cursor = clamped;
     }
 
     /// Keep the cursor on a character in normal mode.
     fn clamp_cursor(&mut self) {
-        let clamped = self.document().clamp_normal_pos(self.window.cursor);
-        self.window.cursor = clamped;
+        let clamped = self.document().clamp_normal_pos(self.cursor());
+        self.windows[self.focus].cursor = clamped;
     }
 
     fn motion(&mut self, f: impl FnOnce(&Document, Pos) -> Pos) {
-        let next = f(self.document(), self.window.cursor);
+        let next = f(self.document(), self.cursor());
         self.set_cursor(next);
     }
 
     fn edit(&mut self, f: impl FnOnce(&mut Document, &mut Pos)) {
-        let mut cursor = self.window.cursor;
-        f(self.doc_mut(), &mut cursor);
-        let clamped = self.document().clamp_pos(cursor);
-        self.window.cursor = clamped;
+        let idx = self.windows[self.focus].buffer;
+        let mut cursor = self.windows[self.focus].cursor;
+        f(&mut self.buffers[idx], &mut cursor);
+        let clamped = self.buffers[idx].clamp_pos(cursor);
+        self.windows[self.focus].cursor = clamped;
+    }
+
+    // ---- windows -------------------------------------------------------
+
+    pub fn set_area(&mut self, width: u16, height: u16) {
+        self.area = Rect::new(0, 0, width, height);
+    }
+
+    /// Where each window is drawn, in tab order of the layout tree.
+    pub fn window_rects(&self) -> Vec<(usize, Rect)> {
+        let mut rects = Vec::new();
+        self.layout.rects(self.body_area(), &mut rects);
+        rects
+    }
+
+    /// Separator cells implied by the current splits.
+    pub fn separators(&self) -> Vec<(SplitDir, Rect)> {
+        let mut out = Vec::new();
+        self.layout.separators(self.body_area(), &mut out);
+        out
+    }
+
+    /// Area left for buffer text once the tab bar, status line and hint line are gone.
+    fn body_area(&self) -> Rect {
+        Rect {
+            x: 0,
+            y: 1,
+            width: self.area.width,
+            height: self.area.height.saturating_sub(3),
+        }
+    }
+
+    pub fn window_snapshot(&self, window: usize) -> Option<&Window> {
+        self.windows.get(window)
+    }
+
+    /// The buffer at `index`, for rendering a specific window.
+    pub fn buffer(&self, index: usize) -> Option<&Document> {
+        self.buffers.get(index)
+    }
+
+    pub fn focused_window(&self) -> usize {
+        self.focus
+    }
+
+    /// Split the focused window, showing the same buffer at the same place in both halves.
+    pub fn split_window(&mut self, dir: SplitDir) {
+        let current = self.windows[self.focus];
+        let new_window = self.windows.len();
+        self.windows.push(Window { scroll: 0, ..current });
+        if !self.layout.split_leaf(self.focus, dir, new_window) {
+            self.windows.pop();
+            return;
+        }
+        self.focus = new_window;
+    }
+
+    /// Close the focused window. Refused when it is the last one.
+    pub fn close_window(&mut self) {
+        if self.windows.len() <= 1 {
+            self.message = Some("this is the last window — :q to quit".to_owned());
+            return;
+        }
+        let closing = self.focus;
+        if !self.layout.remove_leaf(closing) {
+            return;
+        }
+        self.windows.remove(closing);
+        self.layout.remap(&|id| if id > closing { id - 1 } else { id });
+        self.focus = self.layout.leaves().first().copied().unwrap_or(0);
+        let index = self.windows[self.focus].buffer;
+        let _ = index;
+    }
+
+    /// Close every window except the focused one.
+    pub fn only_window(&mut self) {
+        let keep = self.windows[self.focus];
+        self.windows = vec![keep];
+        self.layout = Layout::leaf(0);
+        self.focus = 0;
+    }
+
+    pub fn focus_next_window(&mut self) {
+        let leaves = self.layout.leaves();
+        if leaves.len() <= 1 {
+            return;
+        }
+        let position = leaves.iter().position(|id| *id == self.focus).unwrap_or(0);
+        self.focus = leaves[(position + 1) % leaves.len()];
+    }
+
+    /// Move focus to the window in `direction` (`h`, `j`, `k`, `l`).
+    pub fn focus_direction(&mut self, direction: char) {
+        let rects = self.window_rects();
+        if let Some(target) = layout::neighbor(&rects, self.focus, direction) {
+            self.focus = target;
+        } else {
+            self.message = Some(format!("no window to the {direction}"));
+        }
     }
 
     /// Every open buffer, in tab order.
@@ -178,22 +288,24 @@ impl App {
         &self.buffers
     }
 
+    /// Index of the buffer shown by the focused window.
     pub fn active(&self) -> usize {
-        self.active
+        self.windows[self.focus].buffer
     }
 
     fn switch_to(&mut self, idx: usize) {
         if idx < self.buffers.len() {
-            self.active = idx;
+            self.windows[self.focus].buffer = idx;
+            self.windows[self.focus].cursor = Pos::default();
+            self.windows[self.focus].scroll = 0;
             self.input = InputState::default();
-            self.window.scroll = 0;
         }
     }
 
     /// Show the next buffer, wrapping around.
     pub fn next_buffer(&mut self) {
         if self.buffers.len() > 1 {
-            let next = (self.active + 1) % self.buffers.len();
+            let next = (self.active() + 1) % self.buffers.len();
             self.switch_to(next);
         } else {
             self.message = Some("only one buffer open".to_owned());
@@ -203,14 +315,15 @@ impl App {
     /// Show the previous buffer, wrapping around.
     pub fn prev_buffer(&mut self) {
         if self.buffers.len() > 1 {
-            let prev = (self.active + self.buffers.len() - 1) % self.buffers.len();
+            let prev = (self.active() + self.buffers.len() - 1) % self.buffers.len();
             self.switch_to(prev);
         } else {
             self.message = Some("only one buffer open".to_owned());
         }
     }
 
-    /// Close the active buffer, refusing when it has unsaved changes.
+    /// Close the buffer shown by the focused window, refusing when it has unsaved changes. Other
+    /// windows showing it fall back to the neighbouring buffer rather than closing.
     pub fn close_buffer(&mut self) {
         if self.document().is_dirty() {
             self.message = Some(format!(
@@ -219,19 +332,29 @@ impl App {
             ));
             return;
         }
+        let closing = self.active();
         if self.buffers.len() == 1 {
             self.buffers[0] = Document::empty();
-            self.active = 0;
+            for window in &mut self.windows {
+                window.buffer = 0;
+                window.cursor = Pos::default();
+                window.scroll = 0;
+            }
         } else {
-            self.buffers.remove(self.active);
-            self.active = self.active.min(self.buffers.len() - 1);
+            self.buffers.remove(closing);
+            let last = self.buffers.len() - 1;
+            let fallback = closing.min(last);
+            for window in &mut self.windows {
+                if window.buffer == closing {
+                    window.buffer = fallback;
+                    window.cursor = Pos::default();
+                    window.scroll = 0;
+                } else if window.buffer > closing {
+                    window.buffer -= 1;
+                }
+            }
         }
         self.input = InputState::default();
-        self.window.scroll = 0;
-    }
-
-    pub fn scroll(&self) -> usize {
-        self.window.scroll
     }
 
     pub fn command_line(&self) -> &str {
@@ -338,10 +461,10 @@ impl App {
         }
         let line = self.cursor().line;
         let margin = 2.min(visible / 2);
-        if line < self.window.scroll + margin {
-            self.window.scroll = line.saturating_sub(margin);
-        } else if line + margin >= self.window.scroll + visible {
-            self.window.scroll = (line + margin + 1).saturating_sub(visible);
+        if line < self.windows[self.focus].scroll + margin {
+            self.windows[self.focus].scroll = line.saturating_sub(margin);
+        } else if line + margin >= self.windows[self.focus].scroll + visible {
+            self.windows[self.focus].scroll = (line + margin + 1).saturating_sub(visible);
         }
     }
 
@@ -376,14 +499,17 @@ impl App {
             Document::new_at(path)
         };
 
+        let index = self.active();
         if self.is_blank_scratch() {
-            self.buffers[self.active] = doc;
+            self.buffers[index] = doc;
         } else {
             self.buffers.push(doc);
-            self.active = self.buffers.len() - 1;
+            let new_index = self.buffers.len() - 1;
+            self.windows[self.focus].buffer = new_index;
         }
         self.input = InputState::default();
-        self.window.scroll = 0;
+        self.windows[self.focus].cursor = Pos::default();
+        self.windows[self.focus].scroll = 0;
     }
 
     /// True when the active buffer is the untouched `[No Name]` start-up buffer, which a newly
@@ -411,6 +537,7 @@ impl App {
             Mode::Command => self.handle_command_line(key),
             Mode::Search => self.handle_search(key),
             Mode::ReplaceConfirm => self.handle_replace_confirm(key),
+            Mode::WindowCmd => self.handle_window_command(key),
             Mode::Palette => self.handle_palette(key),
         }
     }
@@ -423,6 +550,10 @@ impl App {
                 KeyCode::Char('q') => self.try_quit(),
                 KeyCode::Char('k') => {
                     self.open_palette();
+                    Outcome::Continue
+                }
+                KeyCode::Char('w') => {
+                    self.mode = Mode::WindowCmd;
                     Outcome::Continue
                 }
                 KeyCode::Char('r') => {
@@ -815,7 +946,7 @@ impl App {
         self.search = Some(Search {
             query: String::new(),
             origin: self.cursor(),
-            origin_scroll: self.window.scroll,
+            origin_scroll: self.windows[self.focus].scroll,
         });
         self.mode = Mode::Search;
         self.message = None;
@@ -849,7 +980,7 @@ impl App {
     fn cancel_search(&mut self) {
         if let Some(search) = self.search.take() {
             self.set_cursor(search.origin);
-            self.window.scroll = search.origin_scroll;
+            self.windows[self.focus].scroll = search.origin_scroll;
         }
         self.mode = Mode::Normal;
     }
@@ -1142,6 +1273,33 @@ impl App {
         Outcome::Continue
     }
 
+
+    // ---- window commands -----------------------------------------------
+
+    fn handle_window_command(&mut self, key: KeyEvent) -> Outcome {
+        match key.code {
+            KeyCode::Char(direction @ ('h' | 'j' | 'k' | 'l')) => {
+                self.mode = Mode::Normal;
+                self.focus_direction(direction);
+            }
+            KeyCode::Char('w') => {
+                self.mode = Mode::Normal;
+                self.focus_next_window();
+            }
+            KeyCode::Char('c') => {
+                self.mode = Mode::Normal;
+                self.close_window();
+            }
+            KeyCode::Char('o') => {
+                self.mode = Mode::Normal;
+                self.only_window();
+            }
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Normal,
+            _ => self.mode = Mode::Normal,
+        }
+        Outcome::Continue
+    }
+
     // ---- other modes ---------------------------------------------------
 
     fn handle_help(&mut self, key: KeyEvent) -> Outcome {
@@ -1249,6 +1407,22 @@ impl App {
             }
             "redo" => {
                 self.redo();
+                Outcome::Continue
+            }
+            "split" => {
+                self.split_window(SplitDir::Stacked);
+                Outcome::Continue
+            }
+            "vsplit" => {
+                self.split_window(SplitDir::SideBySide);
+                Outcome::Continue
+            }
+            "close-window" => {
+                self.close_window();
+                Outcome::Continue
+            }
+            "only-window" => {
+                self.only_window();
                 Outcome::Continue
             }
             "next-buffer" => {
@@ -1644,12 +1818,12 @@ mod tests {
         let text = (0..100).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
         let mut app = app_with(&text);
         app.follow_cursor(10);
-        assert_eq!(app.scroll(), 0);
+        assert_eq!(app.window_snapshot(app.focused_window()).unwrap().scroll, 0);
         keys(&mut app, "30j");
         app.follow_cursor(10);
-        assert!(app.scroll() > 0);
-        assert!(app.cursor().line < app.scroll() + 10);
-        assert!(app.cursor().line >= app.scroll());
+        assert!(app.window_snapshot(app.focused_window()).unwrap().scroll > 0);
+        assert!(app.cursor().line < app.window_snapshot(app.focused_window()).unwrap().scroll + 10);
+        assert!(app.cursor().line >= app.window_snapshot(app.focused_window()).unwrap().scroll);
     }
 
     #[test]
@@ -2019,5 +2193,102 @@ mod tests {
         keys(&mut app, "q");
         assert_eq!(app.document().text(), "Q a\n");
         assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn vsplit_opens_a_second_window_on_the_same_buffer() {
+        let mut app = app_with("alpha\nbeta\n");
+        app.set_area(80, 24);
+        run_cmd(&mut app, "vsp");
+        assert_eq!(app.window_rects().len(), 2);
+        assert_eq!(app.buffers().len(), 1, "a split does not open a second file");
+
+        let right = app.focused_window();
+        keys(&mut app, "j");
+        assert_eq!(app.cursor().line, 1);
+        let left = app.window_rects()[0].0;
+        assert_eq!(
+            app.window_snapshot(left).unwrap().cursor.line,
+            0,
+            "the other window keeps its own cursor"
+        );
+
+        app.focus_direction('h');
+        assert_eq!(app.focused_window(), left);
+        assert_eq!(app.cursor().line, 0);
+        let _ = right;
+    }
+
+    #[test]
+    fn sp_stacks_windows_and_focus_moves_down() {
+        let mut app = app_with("alpha\nbeta\n");
+        app.set_area(80, 24);
+        run_cmd(&mut app, "sp");
+        let [top, bottom] = [app.window_rects()[0].0, app.window_rects()[1].0];
+        assert_eq!(app.focused_window(), bottom);
+        app.focus_direction('k');
+        assert_eq!(app.focused_window(), top);
+        app.focus_direction('j');
+        assert_eq!(app.focused_window(), bottom);
+    }
+
+    #[test]
+    fn closing_a_window_keeps_the_file_open() {
+        let mut app = app_with("alpha\n");
+        run_cmd(&mut app, "vsp");
+        assert_eq!(app.window_rects().len(), 2);
+        run_cmd(&mut app, "close");
+        assert_eq!(app.window_rects().len(), 1);
+        assert_eq!(app.buffers().len(), 1);
+    }
+
+    #[test]
+    fn the_last_window_cannot_be_closed() {
+        let mut app = app_with("alpha\n");
+        run_cmd(&mut app, "close");
+        assert_eq!(app.window_rects().len(), 1);
+        assert!(app.message().unwrap().contains("last window"));
+    }
+
+    #[test]
+    fn only_closes_every_other_window() {
+        let mut app = app_with("alpha\n");
+        run_cmd(&mut app, "vsp");
+        run_cmd(&mut app, "sp");
+        assert_eq!(app.window_rects().len(), 3);
+        run_cmd(&mut app, "only");
+        assert_eq!(app.window_rects().len(), 1);
+    }
+
+    #[test]
+    fn asking_for_a_window_that_is_not_there_says_so() {
+        let mut app = app_with("alpha\n");
+        app.set_area(80, 24);
+        app.focus_direction('l');
+        assert!(app.message().unwrap().contains("no window to the l"));
+    }
+
+    #[test]
+    fn ctrl_w_opens_the_window_command_prompt() {
+        let mut app = app_with("alpha\n");
+        app.handle_key(ctrl('w'));
+        assert_eq!(app.mode(), Mode::WindowCmd);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn closing_a_buffer_that_a_second_window_shows_falls_back() {
+        let (mut app, path) = app_with_path("alpha\n");
+        let other = path.with_file_name("other-split.txt");
+        fs::write(&other, "other\n").unwrap();
+        run_cmd(&mut app, &format!("e {}", other.display()));
+        run_cmd(&mut app, "vsp");
+
+        // the focused window shows the second file; close it
+        run_cmd(&mut app, "bd");
+        assert_eq!(app.buffers().len(), 1);
+        assert_eq!(app.window_rects().len(), 2);
+        assert_eq!(app.document().display_name(), "buffer.txt");
     }
 }

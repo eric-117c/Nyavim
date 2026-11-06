@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::command;
+use crate::layout::SplitDir;
 use crate::mode::Mode;
 
 /// Width of the command-name column in the palette.
@@ -60,17 +61,69 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
-    let doc = app.document();
-    let cursor = app.cursor();
+fn draw_body(frame: &mut Frame, _area: Rect, app: &App) {
+    let highlight = app.search_highlight();
+    let focused = app.focused_window();
+
+    for (id, rect) in app.window_rects() {
+        let Some(window) = app.window_snapshot(id) else {
+            continue;
+        };
+        let Some(doc) = app.buffer(window.buffer) else {
+            continue;
+        };
+        draw_window(frame, rect, doc, window, id == focused, app.mode(), highlight);
+    }
+
+    for (direction, rect) in app.separators() {
+        draw_separator(frame, direction, rect);
+    }
+}
+
+fn draw_separator(frame: &mut Frame, direction: SplitDir, area: Rect) {
+    let style = Style::default().fg(Color::DarkGray);
+    let symbol = match direction {
+        SplitDir::SideBySide => "│",
+        SplitDir::Stacked => "─",
+    };
+    let buffer = frame.buffer_mut();
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            buffer.set_string(x, y, symbol, style);
+        }
+    }
+}
+
+fn draw_window(
+    frame: &mut Frame,
+    area: Rect,
+    doc: &crate::document::Document,
+    window: &crate::app::Window,
+    focused: bool,
+    mode: Mode,
+    highlight: Option<(&str, bool)>,
+) {
+    let cursor = window.cursor;
     let height = area.height as usize;
+    if height == 0 || area.width == 0 {
+        return;
+    }
     let number_width = digits(doc.line_count()).max(3);
 
-    let top = app.scroll().min(doc.line_count().saturating_sub(1));
+    let top = window.scroll.min(doc.line_count().saturating_sub(1));
     let bottom = (top + height).min(doc.line_count());
 
-    let cursor_visible = !matches!(app.mode(), Mode::Help | Mode::Palette | Mode::Command);
-    let highlight = app.search_highlight();
+    let cursor_visible = focused
+        && !matches!(
+            mode,
+            Mode::Help | Mode::Palette | Mode::Command | Mode::ReplaceConfirm | Mode::WindowCmd
+        );
+    let gutter_style = if focused {
+        Style::default().fg(Color::Gray)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
     let mut lines = Vec::with_capacity(height);
     for idx in top..bottom {
         let text = doc.line(idx);
@@ -88,7 +141,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
         };
         let mut spans = vec![Span::styled(
             format!("{:>number_width$} ", idx + 1, number_width = number_width),
-            Style::default().fg(Color::DarkGray),
+            gutter_style,
         )];
         spans.extend(line_spans(&text, cursor_col, &marks));
         lines.push(Line::from(spans));
@@ -268,6 +321,12 @@ fn draw_hint_line(frame: &mut Frame, area: Rect, app: &App) {
     }
     let hints: &[(&str, &str)] = match app.mode() {
         Mode::Insert => &[("Esc ", "normal"), ("Tab ", "indent"), ("Ctrl+K ", "palette")],
+        Mode::WindowCmd => &[
+            ("h j k l ", "move focus"),
+            ("w ", "cycle"),
+            ("c ", "close"),
+            ("o ", "only this"),
+        ],
         Mode::Normal => &[
             ("i ", "insert"),
             (": ", "command"),
@@ -579,5 +638,28 @@ mod tests {
             last_row.push_str(buffer[(x, 7)].symbol());
         }
         assert!(last_row.contains("beta"), "prompt row shows the query: {last_row:?}");
+    }
+
+    #[test]
+    fn a_split_draws_two_panes_with_a_separator() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = app_with("alpha\nbeta\n");
+        app.set_area(40, 10);
+        app.handle_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        for ch in "vsp".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let screen = screen(&app, 40, 10);
+        assert!(
+            screen.lines().nth(1).unwrap_or_default().contains('│'),
+            "a separator column is drawn between panes:\n{screen}"
+        );
+        assert!(
+            screen.matches("alpha").count() >= 2,
+            "both panes show the buffer:\n{screen}"
+        );
     }
 }
