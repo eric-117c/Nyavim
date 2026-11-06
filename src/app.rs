@@ -83,6 +83,12 @@ struct InputState {
     count: Option<usize>,
     operator: Option<Operator>,
     g_prefix: bool,
+    /// `i` / `a` after an operator: `Some(true)` for inner, `Some(false)` for around.
+    text_object: Option<bool>,
+    /// Register chosen with `"`, or `None` for the unnamed one.
+    register: Option<char>,
+    /// A `"` was typed and the register name is the next key.
+    awaiting_register: bool,
 }
 
 impl InputState {
@@ -115,6 +121,10 @@ pub struct App {
     area: Rect,
     input: InputState,
     register: Option<Register>,
+    /// Named registers (`"ay`, `"ap`).
+    named_registers: std::collections::HashMap<char, Register>,
+    /// Where a visual selection started.
+    visual_anchor: Option<Pos>,
     /// Whether the current insert session has taken its undo checkpoint yet.
     insert_started: bool,
     search: Option<Search>,
@@ -155,6 +165,8 @@ impl App {
             area: Rect::new(0, 0, 80, 24),
             input: InputState::default(),
             register: None,
+            named_registers: std::collections::HashMap::new(),
+            visual_anchor: None,
             insert_started: false,
             search: None,
             replacer: None,
@@ -867,6 +879,7 @@ impl App {
             Mode::WindowCmd => self.handle_window_command(key),
             Mode::CommitMsg => self.handle_commit_message(key),
             Mode::Terminal => Outcome::Continue,
+            Mode::Visual => self.handle_visual(key),
             Mode::Palette => self.handle_palette(key),
         }
     }
@@ -925,6 +938,14 @@ impl App {
                 return Outcome::Continue;
             }
             _ => {}
+        }
+
+        if self.input.awaiting_register {
+            self.input.awaiting_register = false;
+            if let KeyCode::Char(name) = key.code {
+                self.input.register = Some(name);
+            }
+            return Outcome::Continue;
         }
 
         if let Some(op) = self.input.operator {
@@ -1015,6 +1036,10 @@ impl App {
             KeyCode::Char('p') => self.paste(false),
             KeyCode::Char('P') => self.paste(true),
             KeyCode::Char('u') => self.undo(),
+            KeyCode::Char('v') => self.start_visual(),
+            KeyCode::Char('"') => self.input.awaiting_register = true,
+            KeyCode::Char('J') => self.join_lines(),
+            KeyCode::Char('%') => self.jump_to_matching_bracket(),
             KeyCode::Char('/') => self.start_search(),
             KeyCode::Char('n') => self.search_next(),
             KeyCode::Char('N') => self.search_previous(),
@@ -1107,14 +1132,34 @@ impl App {
     }
 
     fn apply_operator(&mut self, op: Operator, key: KeyEvent) {
-        self.input.operator = None;
         if self.document().is_read_only() {
             self.message = Some("read-only: file is larger than 50 MB".to_owned());
+            self.input = InputState::default();
             return;
         }
         if key.code == KeyCode::Esc {
+            self.input = InputState::default();
             return;
         }
+
+        // second half of a text object: `diw`, `ca"`, ...
+        if let Some(inner) = self.input.text_object {
+            self.input.text_object = None;
+            let KeyCode::Char(kind) = key.code else {
+                return;
+            };
+            if let Some((start, end)) = self.text_object(inner, kind) {
+                self.execute_operator(op, start, end);
+            }
+            return;
+        }
+        // first half: keep the operator pending and remember which flavour was asked for
+        if let KeyCode::Char(kind @ ('i' | 'a')) = key.code {
+            self.input.text_object = Some(kind == 'i');
+            return;
+        }
+
+        self.input.operator = None;
         let count = self.input.take_count();
 
         let doubled = matches!(
@@ -1144,33 +1189,33 @@ impl App {
             end
         };
 
-        if op != Operator::Yank {
-            self.checkpoint();
+        self.execute_operator(op, start, end);
+    }
+
+    /// Apply `op` to a half-open range, honouring any register picked with `"`.
+    fn execute_operator(&mut self, op: Operator, start: Pos, end: Pos) {
+        if start >= end {
+            return;
         }
+        let target = self.input.register.take();
         let text = self.document().slice(start, end);
         match op {
             Operator::Yank => {
-                self.register = Some(Register {
-                    text,
-                    linewise: false,
-                });
+                self.store_register(target, text, false);
                 self.set_cursor(start);
+                self.clamp_cursor();
             }
             Operator::Delete => {
+                self.checkpoint();
                 self.doc_mut().remove(start, end);
-                self.register = Some(Register {
-                    text,
-                    linewise: false,
-                });
+                self.store_register(target, text, false);
                 self.set_cursor(start);
                 self.clamp_cursor();
             }
             Operator::Change => {
+                self.checkpoint();
                 self.doc_mut().remove(start, end);
-                self.register = Some(Register {
-                    text,
-                    linewise: false,
-                });
+                self.store_register(target, text, false);
                 self.set_cursor(start);
                 self.enter_insert();
             }
@@ -1210,25 +1255,20 @@ impl App {
 
         let lines: Vec<String> = (0..n).map(|i| self.document().line(line + i)).collect();
         let text = lines.join("\n");
+        let target = self.input.register.take();
         if op != Operator::Yank {
             self.checkpoint();
         }
 
         match op {
             Operator::Yank => {
-                self.register = Some(Register {
-                    text,
-                    linewise: true,
-                });
+                self.store_register(target, text, true);
             }
             Operator::Delete => {
                 for _ in 0..n {
                     self.doc_mut().delete_line(line);
                 }
-                self.register = Some(Register {
-                    text,
-                    linewise: true,
-                });
+                self.store_register(target, text, true);
             }
             Operator::Change => {
                 for _ in 0..n {
@@ -1236,10 +1276,7 @@ impl App {
                 }
                 self.doc_mut().insert_lines(line, &[String::new()]);
                 self.set_cursor(Pos::new(line, 0));
-                self.register = Some(Register {
-                    text,
-                    linewise: true,
-                });
+                self.store_register(target, text, true);
                 self.enter_insert();
             }
         }
@@ -1250,7 +1287,8 @@ impl App {
             self.message = Some("read-only: file is larger than 50 MB".to_owned());
             return;
         }
-        let Some(register) = self.register.clone() else {
+        let target = self.input.register.take();
+        let Some(register) = self.take_register(target) else {
             self.message = Some("nothing to paste yet".to_owned());
             return;
         };
@@ -1585,6 +1623,239 @@ impl App {
             self.set_cursor(*pos);
         }
         self.message = Some(format!("replaced {done} of {total} occurrences"));
+    }
+
+    // ---- visual mode ----------------------------------------------------
+
+    pub fn start_visual(&mut self) {
+        self.visual_anchor = Some(self.cursor());
+        self.mode = Mode::Visual;
+    }
+
+    /// The selected range, half-open, in buffer coordinates.
+    pub fn selection(&self) -> Option<(Pos, Pos)> {
+        if self.mode != Mode::Visual {
+            return None;
+        }
+        let anchor = self.visual_anchor?;
+        let cursor = self.cursor();
+        let (a, b) = ordered(anchor, cursor);
+        Some((a, Pos::new(b.line, b.col + 1)))
+    }
+
+    fn handle_visual(&mut self, key: KeyEvent) -> Outcome {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
+            return self.try_quit();
+        }
+        let count = 1;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('v') => self.leave_visual(),
+            KeyCode::Char('o') => {
+                let cursor = self.cursor();
+                if let Some(anchor) = self.visual_anchor.replace(cursor) {
+                    self.set_cursor(anchor);
+                }
+            }
+            KeyCode::Char('d') => self.visual_operator(Operator::Delete),
+            KeyCode::Char('y') => self.visual_operator(Operator::Yank),
+            KeyCode::Char('c') => self.visual_operator(Operator::Change),
+            KeyCode::Char('"') => self.input.awaiting_register = true,
+            KeyCode::Char('h') | KeyCode::Left => self.motion(|doc, c| doc.move_left(c, count)),
+            KeyCode::Char('l') | KeyCode::Right => self.motion(|doc, c| doc.move_right(c, count)),
+            KeyCode::Char('j') | KeyCode::Down => self.motion(|doc, c| doc.move_down(c, count)),
+            KeyCode::Char('k') | KeyCode::Up => self.motion(|doc, c| doc.move_up(c, count)),
+            KeyCode::Char('w') => self.motion(|doc, c| doc.move_word_forward(c, count)),
+            KeyCode::Char('b') => self.motion(|doc, c| doc.move_word_backward(c, count)),
+            KeyCode::Char('0') | KeyCode::Home => {
+                let line = self.cursor().line;
+                self.set_cursor(Pos::new(line, 0));
+            }
+            KeyCode::Char('$') | KeyCode::End => self.motion(|doc, c| doc.move_line_end(c)),
+            _ => {}
+        }
+        Outcome::Continue
+    }
+
+    fn leave_visual(&mut self) {
+        self.visual_anchor = None;
+        self.mode = Mode::Normal;
+    }
+
+    fn visual_operator(&mut self, op: Operator) {
+        let Some((start, end)) = self.selection() else {
+            self.leave_visual();
+            return;
+        };
+        self.leave_visual();
+        self.execute_operator(op, start, end);
+    }
+
+    // ---- registers ------------------------------------------------------
+
+    fn store_register(&mut self, name: Option<char>, text: String, linewise: bool) {
+        let register = Register { text, linewise };
+        match name {
+            Some(name) => {
+                self.named_registers.insert(name, register);
+            }
+            None => self.register = Some(register),
+        }
+    }
+
+    fn take_register(&mut self, name: Option<char>) -> Option<Register> {
+        match name {
+            Some(name) => self.named_registers.get(&name).cloned(),
+            None => self.register.clone(),
+        }
+    }
+
+    // ---- extra motions --------------------------------------------------
+
+    /// `J`: pull the next line up, leaving a single space when both sides have text.
+    fn join_lines(&mut self) {
+        if self.document().is_read_only() {
+            self.message = Some("read-only: file is larger than 50 MB".to_owned());
+            return;
+        }
+        let line = self.cursor().line;
+        if line + 1 >= self.document().line_count() {
+            self.message = Some("nothing to join below".to_owned());
+            return;
+        }
+        self.checkpoint();
+        let left_len = self.document().line_len(line);
+        let right_len = self.document().line_len(line + 1);
+        let needs_space = left_len > 0 && right_len > 0;
+        self.doc_mut()
+            .remove(Pos::new(line, left_len), Pos::new(line + 1, 0));
+        if needs_space {
+            self.doc_mut().insert_at(Pos::new(line, left_len), " ");
+        }
+        let column = if needs_space { left_len + 1 } else { left_len };
+        self.set_cursor(Pos::new(line, column));
+        self.clamp_cursor();
+    }
+
+    /// `%`: jump between a bracket and its partner, scanning across lines.
+    fn jump_to_matching_bracket(&mut self) {
+        let cursor = self.cursor();
+        let Some(open) = self.document().char_at_pos(cursor) else {
+            self.message = Some("no bracket under the cursor".to_owned());
+            return;
+        };
+        let (pair, forward) = match open {
+            '(' => (')', true),
+            '[' => (']', true),
+            '{' => ('}', true),
+            ')' => ('(', false),
+            ']' => ('[', false),
+            '}' => ('{', false),
+            _ => {
+                self.message = Some("no bracket under the cursor".to_owned());
+                return;
+            }
+        };
+        // whichever way we scan, brackets of the same kind as the one under the cursor nest, and the
+        // partner kind is what we are looking for
+        let (nesting, target) = (open, pair);
+
+        let mut depth = 0i32;
+        let mut pos = cursor;
+        while let Some(next) = self.step_position(pos, forward) {
+            pos = next;
+            match self.document().char_at_pos(pos) {
+                Some(ch) if ch == target => {
+                    if depth == 0 {
+                        self.set_cursor(pos);
+                        return;
+                    }
+                    depth -= 1;
+                }
+                Some(ch) if ch == nesting => depth += 1,
+                _ => {}
+            }
+            if depth > 200 {
+                break;
+            }
+        }
+        self.message = Some(format!("no matching {target}"));
+    }
+
+    /// One character forward or backward through the buffer.
+    fn step_position(&self, pos: Pos, forward: bool) -> Option<Pos> {
+        let doc = self.document();
+        if forward {
+            if pos.col + 1 < doc.line_len(pos.line) {
+                Some(Pos::new(pos.line, pos.col + 1))
+            } else if pos.line + 1 < doc.line_count() {
+                Some(Pos::new(pos.line + 1, 0))
+            } else {
+                None
+            }
+        } else if pos.col > 0 {
+            Some(Pos::new(pos.line, pos.col - 1))
+        } else if pos.line > 0 {
+            let previous = pos.line - 1;
+            Some(Pos::new(previous, doc.line_len(previous).saturating_sub(1)))
+        } else {
+            None
+        }
+    }
+
+    // ---- text objects ---------------------------------------------------
+
+    /// Range for `i`/`a` plus a character, on the cursor's line. Multi-line nesting is out of scope.
+    fn text_object(&self, inner: bool, kind: char) -> Option<(Pos, Pos)> {
+        let cursor = self.cursor();
+        let chars: Vec<char> = self.document().line(cursor.line).chars().collect();
+        if chars.is_empty() {
+            return None;
+        }
+
+        if kind == 'w' {
+            let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+            if !chars.get(cursor.col).copied().is_some_and(is_word) {
+                return None;
+            }
+            let mut start = cursor.col;
+            while start > 0 && is_word(chars[start - 1]) {
+                start -= 1;
+            }
+            let mut end = cursor.col;
+            while end < chars.len() && is_word(chars[end]) {
+                end += 1;
+            }
+            if !inner {
+                let before = end;
+                while end < chars.len() && chars[end].is_whitespace() {
+                    end += 1;
+                }
+                if end == before {
+                    while start > 0 && chars[start - 1].is_whitespace() {
+                        start -= 1;
+                    }
+                }
+            }
+            return Some((Pos::new(cursor.line, start), Pos::new(cursor.line, end)));
+        }
+
+        let (open, close) = match kind {
+            '"' => ('"', '"'),
+            '\'' => ('\'', '\''),
+            '`' => ('`', '`'),
+            '(' | ')' => ('(', ')'),
+            '[' | ']' => ('[', ']'),
+            '{' | '}' => ('{', '}'),
+            '<' | '>' => ('<', '>'),
+            _ => return None,
+        };
+        let (open_at, close_at) = enclosing_pair(&chars, cursor.col, open, close)?;
+        let (start, end) = if inner {
+            (open_at + 1, close_at)
+        } else {
+            (open_at, close_at + 1)
+        };
+        Some((Pos::new(cursor.line, start), Pos::new(cursor.line, end)))
     }
 
     // ---- insert mode ---------------------------------------------------
@@ -1956,6 +2227,60 @@ impl App {
             }
         }
     }
+}
+
+/// Enclosing pair of `open`/`close` around `cursor` on one line, as indexes into `chars`.
+fn enclosing_pair(
+    chars: &[char],
+    cursor: usize,
+    open: char,
+    close: char,
+) -> Option<(usize, usize)> {
+    if open == close {
+        let mut index = 0;
+        while index < chars.len() {
+            if chars[index] == open {
+                if let Some(offset) = chars[index + 1..].iter().position(|ch| *ch == close) {
+                    let end = index + 1 + offset;
+                    if index <= cursor && cursor <= end {
+                        return Some((index, end));
+                    }
+                    index = end + 1;
+                    continue;
+                }
+            }
+            index += 1;
+        }
+        return None;
+    }
+
+    let mut depth = 0i32;
+    let mut start = None;
+    for index in (0..=cursor.min(chars.len().saturating_sub(1))).rev() {
+        if chars[index] == close {
+            depth += 1;
+        } else if chars[index] == open {
+            if depth == 0 {
+                start = Some(index);
+                break;
+            }
+            depth -= 1;
+        }
+    }
+    let start = start?;
+
+    let mut depth = 0i32;
+    for (index, ch) in chars.iter().enumerate().skip(start + 1) {
+        if *ch == open {
+            depth += 1;
+        } else if *ch == close {
+            if depth == 0 {
+                return Some((start, index));
+            }
+            depth -= 1;
+        }
+    }
+    None
 }
 
 /// Byte offset of character column `col` in `text`.
@@ -2988,5 +3313,101 @@ mod tests {
         app.set_config(crate::config::Config::load_from(&cfg));
         app.open(&file);
         assert_eq!(app.language(), crate::syntax::Language::Rust);
+    }
+
+    #[test]
+    fn visual_mode_selects_and_deletes_a_range() {
+        let mut app = app_with("alpha beta gamma\n");
+        keys(&mut app, "wv"); // start visual at "beta"
+        assert_eq!(app.mode(), Mode::Visual);
+        assert_eq!(app.selection(), Some((Pos::new(0, 6), Pos::new(0, 7))));
+        keys(&mut app, "l l"); // extend two characters
+        keys(&mut app, "d");
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.document().line(0), "alpha a gamma");
+        assert_eq!(app.selection(), None);
+    }
+
+    #[test]
+    fn visual_yank_then_put_uses_the_unnamed_register() {
+        let mut app = app_with("one two\n");
+        keys(&mut app, "vll"); // select "one"
+        keys(&mut app, "y");
+        assert_eq!(app.mode(), Mode::Normal);
+        keys(&mut app, "$");
+        keys(&mut app, "p");
+        assert_eq!(app.document().line(0), "one twoone");
+    }
+
+    #[test]
+    fn visual_escape_cancels_without_touching_text() {
+        let mut app = app_with("hello\n");
+        keys(&mut app, "vll");
+        esc(&mut app);
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.document().line(0), "hello");
+    }
+
+    #[test]
+    fn diw_deletes_the_word_under_the_cursor() {
+        let mut app = app_with("alpha beta gamma\n");
+        keys(&mut app, "w"); // on "beta"
+        keys(&mut app, "diw");
+        assert_eq!(app.document().line(0), "alpha  gamma");
+    }
+
+    #[test]
+    fn daw_takes_the_trailing_space_too() {
+        let mut app = app_with("alpha beta gamma\n");
+        keys(&mut app, "w");
+        keys(&mut app, "daw");
+        assert_eq!(app.document().line(0), "alpha gamma");
+    }
+
+    #[test]
+    fn a_quote_text_object_selects_inside_and_around() {
+        let mut app = app_with("say \"hello world\" now\n");
+        keys(&mut app, "f"); // no-op, keeps us at the start
+        for _ in 0..6 {
+            keys(&mut app, "l"); // inside the quotes
+        }
+        keys(&mut app, "ci");
+        keys(&mut app, "\"");
+        keys(&mut app, "bye");
+        esc(&mut app);
+        assert_eq!(app.document().line(0), "say \"bye\" now");
+    }
+
+    #[test]
+    fn percent_jumps_between_brackets() {
+        let mut app = app_with("fn main() {\n  body();\n}\n");
+        for _ in 0..10 {
+            keys(&mut app, "l");
+        }
+        assert_eq!(app.document().char_at_pos(app.cursor()), Some('{'));
+        keys(&mut app, "%");
+        assert_eq!(
+            app.cursor().line,
+            2,
+            "the closing brace is on the last line"
+        );
+        keys(&mut app, "%");
+        assert_eq!(app.cursor(), Pos::new(0, 10), "and back again");
+    }
+
+    #[test]
+    fn a_named_register_keeps_its_own_yank() {
+        let mut app = app_with("keep\nother\n");
+        keys(&mut app, "\"ayy"); // yank line 1 into register a
+        keys(&mut app, "j");
+        keys(&mut app, "\"ap"); // paste it below line 2
+        assert_eq!(app.document().line(2), "keep");
+    }
+
+    #[test]
+    fn shift_j_joins_the_next_line() {
+        let mut app = app_with("first\nsecond\n");
+        keys(&mut app, "J");
+        assert_eq!(app.document().text(), "first second\n");
     }
 }

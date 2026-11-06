@@ -1,7 +1,7 @@
 ---
 id: nyavim-architecture
 type: architecture-design
-status: draft
+status: active
 parent: nyavim-goal
 title: nyavim 架构：分层、事件循环与可发现性契约
 ---
@@ -45,6 +45,12 @@ title: nyavim 架构：分层、事件循环与可发现性契约
 - **焦点移动按几何**：用各窗口矩形在目标方向上的相邻性与另一轴重叠度挑选目标，因此嵌套切分也能跳到正确的那一窗。
 - 标签栏仍是缓冲列表，`Ctrl+N`/`Ctrl+P` 改变**焦点窗口**显示的缓冲；关闭缓冲时，显示它的窗口回退到相邻缓冲。
 - 状态行与提示行只有一行，永远描述焦点窗口；`Ctrl+W` 是前缀模式（`Mode::WindowCmd`），提示行列出来可用按键。
+
+## 选择与文本对象
+
+- visual 选择是 `visual_anchor` + 光标两个点，渲染与算子共用 `App::selection()` 给出的半开区间，不再各自算一遍。
+- 文本对象（`iw`/`aw` 与引号、括号的 `i`/`a`）在光标所在行内解析，返回与算子相同的半开区间，因此 `diw`、`ci"` 与 `d$` 走同一条执行路径（`execute_operator`）。
+- 具名寄存器与 unnamed 寄存器共用 `Register`，`"x` 只是选了一个存放位置。
 
 ## 搜索与替换
 

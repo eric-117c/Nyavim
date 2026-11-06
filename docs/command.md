@@ -1,7 +1,7 @@
 ---
 id: nyavim-command
 type: module-design
-status: draft
+status: active
 parent: nyavim-architecture
 title: command 模块：命令注册表与搜索
 ---

@@ -25,7 +25,8 @@ Written in Rust: one static binary, no runtime, no plugin runtime.
 Usable for real editing today:
 
 - vim editing subset — motions, `d`/`c`/`y` with motions, `dd`/`cc`/`yy`, `p`/`P`, counts, insert
-  mode, undo/redo
+  mode, undo/redo, `J`, `%`
+- visual mode and text objects (`diw`, `ci"`, `da(`), named registers (`"ay`, `"ap`)
 - command palette (`Ctrl+K`) and `:` command line sharing one registry, plus `F1` help
 - tabs and window splits (`:sp`, `:vsp`, `Ctrl+W` + `hjkl`)
 - incremental `/` search with match highlighting, `n`/`N`
@@ -65,7 +66,10 @@ py = "rust"
 ```
 
 Key bindings are not configurable yet — that needs the key dispatch to become a data-driven action
-table first.
+table first. The same gap means `.` (repeat) does not exist.
+
+Other known gaps: no soft wrap or horizontal scrolling (long lines run off the screen), no file
+opener beyond `:e <path>`, no system clipboard, and splits are fixed at 50/50.
 
 The product definition lives in [`goal-and-requirements.md`](./goal-and-requirements.md).
 

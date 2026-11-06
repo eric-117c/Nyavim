@@ -1,7 +1,7 @@
 ---
 id: nyavim-document
 type: module-design
-status: draft
+status: active
 parent: nyavim-architecture
 title: document 模块：缓冲区、位置与撤销
 ---

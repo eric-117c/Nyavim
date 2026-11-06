@@ -604,6 +604,11 @@ impl Document {
         cursor.line + 1 >= self.line_count() && cursor.col >= self.line_len(cursor.line)
     }
 
+    /// Character at a position, for bracket matching and text objects.
+    pub fn char_at_pos(&self, pos: Pos) -> Option<char> {
+        self.char_at(pos)
+    }
+
     fn char_at(&self, pos: Pos) -> Option<char> {
         if pos.line >= self.line_count() || pos.col >= self.line_len(pos.line) {
             return None;

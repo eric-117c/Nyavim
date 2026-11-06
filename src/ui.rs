@@ -9,6 +9,7 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::command;
 use crate::config::Theme;
+use crate::document::Pos;
 use crate::layout::SplitDir;
 use crate::mode::Mode;
 use crate::syntax::{self, Language, TokenKind};
@@ -96,6 +97,7 @@ fn draw_body(frame: &mut Frame, _area: Rect, app: &App) {
                 focused: id == focused,
                 mode: app.mode(),
                 highlight,
+                selection: app.selection(),
                 git: app.git_info_for(window.buffer),
                 theme: app.config().theme,
                 tab_width: app.config().tab_width,
@@ -209,6 +211,7 @@ struct PaneView<'a> {
     focused: bool,
     mode: Mode,
     highlight: Option<(&'a str, bool)>,
+    selection: Option<(Pos, Pos)>,
     git: Option<&'a crate::git::GitInfo>,
     theme: Theme,
     tab_width: usize,
@@ -221,6 +224,7 @@ fn draw_window(frame: &mut Frame, area: Rect, view: &PaneView<'_>) {
         focused,
         mode,
         highlight,
+        selection,
         git,
         theme,
         tab_width,
@@ -267,6 +271,19 @@ fn draw_window(frame: &mut Frame, area: Rect, view: &PaneView<'_>) {
             }
             None => Vec::new(),
         };
+        let selected = selection.and_then(|(start, end)| {
+            if idx < start.line || idx > end.line {
+                None
+            } else {
+                let from = if idx == start.line { start.col } else { 0 };
+                let to = if idx == end.line {
+                    end.col
+                } else {
+                    text.chars().count()
+                };
+                Some((from, to))
+            }
+        });
         let mut spans = Vec::new();
         if show_marks {
             spans.push(mark_span(
@@ -280,7 +297,7 @@ fn draw_window(frame: &mut Frame, area: Rect, view: &PaneView<'_>) {
             gutter_style,
         ));
         spans.extend(line_spans(
-            &text, cursor_col, &marks, &tokens, theme, tab_width,
+            &text, cursor_col, &marks, &tokens, theme, tab_width, selected,
         ));
         lines.push(Line::from(spans));
     }
@@ -350,6 +367,7 @@ fn line_spans(
     tokens: &[(usize, usize, TokenKind)],
     theme: Theme,
     tab_width: usize,
+    selection: Option<(usize, usize)>,
 ) -> Vec<Span<'static>> {
     let caret = Style::default().add_modifier(Modifier::REVERSED);
     let mut token_kinds: Vec<Option<TokenKind>> = vec![None; text.chars().count()];
@@ -370,6 +388,8 @@ fn line_spans(
         let base = token_kinds[idx].map(|kind| token_style(kind, theme));
         let style = if Some(idx) == cursor_col {
             Some(caret)
+        } else if selection.is_some_and(|(from, to)| idx >= from && idx < to) {
+            Some(Style::default().bg(Color::Blue).fg(Color::White))
         } else if marks.get(idx).copied().unwrap_or(false) {
             let foreground = token_kinds[idx]
                 .map(|kind| token_style(kind, theme))

@@ -20,6 +20,8 @@ pub enum Mode {
     CommitMsg,
     /// The shell owns the screen; the editor is suspended, not torn down.
     Terminal,
+    /// `v` character-wise selection.
+    Visual,
 }
 
 impl Mode {
@@ -36,6 +38,7 @@ impl Mode {
             Mode::WindowCmd => "WINDOW",
             Mode::CommitMsg => "COMMIT",
             Mode::Terminal => "TERMINAL",
+            Mode::Visual => "VISUAL",
         }
     }
 }
@@ -57,6 +60,7 @@ mod tests {
             Mode::WindowCmd.label(),
             Mode::CommitMsg.label(),
             Mode::Terminal.label(),
+            Mode::Visual.label(),
         ];
         for (i, a) in labels.iter().enumerate() {
             for b in &labels[i + 1..] {

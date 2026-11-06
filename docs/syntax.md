@@ -1,7 +1,7 @@
 ---
 id: nyavim-syntax
 type: module-design
-status: draft
+status: active
 parent: nyavim-architecture
 title: syntax 模块：行级词法器与跨行状态
 ---
