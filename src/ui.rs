@@ -54,7 +54,11 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
         let label = format!(" {}{dirty} ", doc.display_name());
         spans.push(Span::styled(
             label,
-            if idx == app.active() { active } else { inactive },
+            if idx == app.active() {
+                active
+            } else {
+                inactive
+            },
         ));
         spans.push(Span::styled("│", separator));
     }
@@ -72,7 +76,15 @@ fn draw_body(frame: &mut Frame, _area: Rect, app: &App) {
         let Some(doc) = app.buffer(window.buffer) else {
             continue;
         };
-        draw_window(frame, rect, doc, window, id == focused, app.mode(), highlight);
+        draw_window(
+            frame,
+            rect,
+            doc,
+            window,
+            id == focused,
+            app.mode(),
+            highlight,
+        );
     }
 
     for (direction, rect) in app.separators() {
@@ -293,7 +305,10 @@ fn draw_hint_line(frame: &mut Frame, area: Rect, app: &App) {
         let mut spans = vec![
             Span::styled(prefix, Style::default().fg(Color::Cyan)),
             Span::raw(text.to_owned()),
-            Span::styled("\u{2588}", Style::default().add_modifier(Modifier::REVERSED)),
+            Span::styled(
+                "\u{2588}",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ),
         ];
         if app.mode() == Mode::Search {
             spans.push(Span::styled(
@@ -314,13 +329,14 @@ fn draw_hint_line(frame: &mut Frame, area: Rect, app: &App) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(
-            " …  ",
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled(" …  ", Style::default().fg(Color::DarkGray)));
     }
     let hints: &[(&str, &str)] = match app.mode() {
-        Mode::Insert => &[("Esc ", "normal"), ("Tab ", "indent"), ("Ctrl+K ", "palette")],
+        Mode::Insert => &[
+            ("Esc ", "normal"),
+            ("Tab ", "indent"),
+            ("Ctrl+K ", "palette"),
+        ],
         Mode::WindowCmd => &[
             ("h j k l ", "move focus"),
             ("w ", "cycle"),
@@ -341,14 +357,8 @@ fn draw_hint_line(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::raw("  "));
     }
     if app.mode() == Mode::Normal && app.buffers().len() > 1 {
-        spans.push(Span::styled(
-            "Ctrl+N/P ",
-            Style::default().fg(Color::Cyan),
-        ));
-        spans.push(Span::styled(
-            "files",
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled("Ctrl+N/P ", Style::default().fg(Color::Cyan)));
+        spans.push(Span::styled("files", Style::default().fg(Color::DarkGray)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -376,7 +386,10 @@ fn draw_palette(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(Line::from(vec![
             Span::styled("> ", Style::default().fg(Color::Cyan)),
             Span::raw(app.palette_query().to_owned()),
-            Span::styled("\u{2588}", Style::default().add_modifier(Modifier::REVERSED)),
+            Span::styled(
+                "\u{2588}",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ),
         ])),
         query_row,
     );
@@ -409,13 +422,14 @@ fn draw_palette(frame: &mut Frame, area: Rect, app: &App) {
             format!(" {:<NAME_WIDTH$}", cmd.name),
             style.add_modifier(Modifier::BOLD),
         )];
-        row.push(Span::styled(
-            format!("{:<desc_width$}", description),
-            style,
-        ));
+        row.push(Span::styled(format!("{:<desc_width$}", description), style));
         row.push(Span::styled(
             format!(" {} ", cmd.keys),
-            style.fg(if chosen { Color::Black } else { Color::DarkGray }),
+            style.fg(if chosen {
+                Color::Black
+            } else {
+                Color::DarkGray
+            }),
         ));
         lines.push(Line::from(row));
     }
@@ -441,7 +455,9 @@ fn draw_help(frame: &mut Frame, _area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         " Keys",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )));
     for (keys, description) in command::KEYS {
         lines.push(Line::from(vec![
@@ -452,7 +468,9 @@ fn draw_help(frame: &mut Frame, _area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " Commands",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )));
     for cmd in command::COMMANDS {
         lines.push(Line::from(vec![
@@ -532,10 +550,16 @@ mod tests {
     fn renders_the_buffer_with_line_numbers_and_the_status_line() {
         let app = app_with("alpha\nbeta\n");
         let screen = screen(&app, 40, 8);
-        assert!(screen.contains("shown.txt"), "tab bar shows the file name: {screen}");
+        assert!(
+            screen.contains("shown.txt"),
+            "tab bar shows the file name: {screen}"
+        );
         assert!(screen.contains("alpha"));
         assert!(screen.contains("beta"));
-        assert!(screen.contains("NORMAL"), "status line shows the mode: {screen}");
+        assert!(
+            screen.contains("NORMAL"),
+            "status line shows the mode: {screen}"
+        );
         assert!(screen.contains("1:1"));
         assert!(screen.contains("LF"));
     }
@@ -630,14 +654,21 @@ mod tests {
             "the match under the cursor is the caret"
         );
         let hit_cell = &buffer[(4, 2)];
-        assert_eq!(hit_cell.style().bg, Some(Color::Yellow), "other matches are highlighted");
+        assert_eq!(
+            hit_cell.style().bg,
+            Some(Color::Yellow),
+            "other matches are highlighted"
+        );
         assert_eq!(hit_cell.symbol(), "b");
 
         let mut last_row = String::new();
         for x in 0..40 {
             last_row.push_str(buffer[(x, 7)].symbol());
         }
-        assert!(last_row.contains("beta"), "prompt row shows the query: {last_row:?}");
+        assert!(
+            last_row.contains("beta"),
+            "prompt row shows the query: {last_row:?}"
+        );
     }
 
     #[test]

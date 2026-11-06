@@ -45,3 +45,7 @@ cargo build --release
 ```
 
 Requires a terminal with UTF-8 support on Linux or macOS.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

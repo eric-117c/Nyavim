@@ -274,10 +274,7 @@ impl Document {
     pub fn clamp_normal_pos(&self, pos: Pos) -> Pos {
         let pos = self.clamp_pos(pos);
         let len = self.line_len(pos.line);
-        Pos::new(
-            pos.line,
-            if len == 0 { 0 } else { pos.col.min(len - 1) },
-        )
+        Pos::new(pos.line, if len == 0 { 0 } else { pos.col.min(len - 1) })
     }
 
     fn char_index(&self, pos: Pos) -> usize {
@@ -518,7 +515,11 @@ impl Document {
             if line > from.line || line >= self.line_count() {
                 break;
             }
-            let boundary = if line == from.line { Some(from.col) } else { None };
+            let boundary = if line == from.line {
+                Some(from.col)
+            } else {
+                None
+            };
             if let Some(&col) = slice_matches(slice, needle, &lowered, case_sensitive)
                 .iter()
                 .rev()
@@ -1022,7 +1023,10 @@ mod tests {
         doc.insert_char(&mut cursor, 'X');
         assert!(doc.is_dirty());
         doc.undo(cursor).expect("undo");
-        assert!(!doc.is_dirty(), "undoing back to the saved text is not a change");
+        assert!(
+            !doc.is_dirty(),
+            "undoing back to the saved text is not a change"
+        );
     }
 
     #[test]
@@ -1091,5 +1095,4 @@ mod tests {
         assert_eq!(doc.find_all_in_line(0, "beta", false), vec![0, 5]);
         assert_eq!(doc.find_all_in_line(0, "beta", true), vec![5]);
     }
-
 }

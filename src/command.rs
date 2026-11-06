@@ -155,14 +155,23 @@ pub const KEYS: &[(&str, &str)] = &[
     ("x", "delete the character under the cursor"),
     ("u Ctrl+R", "undo / redo"),
     ("/ n N", "search, next match, previous match"),
-    (":s/old/new/g", "replace in this line (:%%s for the whole file, c to confirm)"),
+    (
+        ":s/old/new/g",
+        "replace in this line (:%%s for the whole file, c to confirm)",
+    ),
     ("p P", "paste after / before the cursor"),
     (":", "command line"),
     ("Ctrl+K", "command palette"),
     ("Ctrl+N Ctrl+P", "next / previous open file"),
     (":sp :vsp", "split this window above/below or side by side"),
-    ("Ctrl+W h j k l", "move focus to the window in that direction"),
-    ("Ctrl+W w c o", "cycle windows, close this one, close the others"),
+    (
+        "Ctrl+W h j k l",
+        "move focus to the window in that direction",
+    ),
+    (
+        "Ctrl+W w c o",
+        "cycle windows, close this one, close the others",
+    ),
     ("F1", "this page"),
     ("Ctrl+Q", "quit"),
 ];
@@ -181,7 +190,8 @@ pub struct Substitute {
     pub confirm: bool,
 }
 
-pub const SUBSTITUTE_USAGE: &str = "usage: :s/pattern/replacement/[gc]  or  :%s/pattern/replacement/[gc]";
+pub const SUBSTITUTE_USAGE: &str =
+    "usage: :s/pattern/replacement/[gc]  or  :%s/pattern/replacement/[gc]";
 
 /// Does this command line want the substitute parser rather than a named command?
 pub fn looks_like_substitute(line: &str) -> bool {
@@ -202,7 +212,10 @@ pub fn parse_substitute(line: &str) -> Result<Substitute, String> {
     let rest = rest
         .strip_prefix('s')
         .ok_or_else(|| SUBSTITUTE_USAGE.to_owned())?;
-    let delimiter = rest.chars().next().ok_or_else(|| SUBSTITUTE_USAGE.to_owned())?;
+    let delimiter = rest
+        .chars()
+        .next()
+        .ok_or_else(|| SUBSTITUTE_USAGE.to_owned())?;
     let body = &rest[delimiter.len_utf8()..];
 
     let parts: Vec<&str> = body.split(delimiter).collect();
@@ -253,7 +266,7 @@ pub fn search(query: &str) -> Vec<&'static Command> {
             let by_name = fuzzy_score(query, cmd.name);
             let by_description = fuzzy_score(query, cmd.description).map(|s| s / 2);
             let score = match (by_name, by_description) {
-                (Some(a), Some(b)) => Some(a.max(b) ),
+                (Some(a), Some(b)) => Some(a.max(b)),
                 (Some(a), None) => Some(a),
                 (None, Some(b)) => Some(b),
                 (None, None) => None,

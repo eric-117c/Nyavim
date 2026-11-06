@@ -196,11 +196,7 @@ fn divide(area: Rect, dir: SplitDir) -> (Rect, Rect) {
 ///
 /// Picks the adjacent rectangle in that direction with the largest overlap on the other axis, so
 /// pressing `j` in a split layout lands in the window that is actually below the cursor.
-pub fn neighbor(
-    rects: &[(usize, Rect)],
-    from: usize,
-    direction: char,
-) -> Option<usize> {
+pub fn neighbor(rects: &[(usize, Rect)], from: usize, direction: char) -> Option<usize> {
     let current = rects.iter().find(|(id, _)| *id == from)?.1;
     let mut best: Option<(usize, u32)> = None;
 

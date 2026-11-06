@@ -8,8 +8,8 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
 use crate::command::{self, Command, Substitute};
-use crate::layout::{self, Layout, SplitDir};
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
+use crate::layout::{self, Layout, SplitDir};
 use crate::mode::Mode;
 
 /// What the main loop should do after a key has been handled.
@@ -81,7 +81,11 @@ impl InputState {
     }
 
     fn push_digit(&mut self, digit: usize) {
-        let n = self.count.unwrap_or(0).saturating_mul(10).saturating_add(digit);
+        let n = self
+            .count
+            .unwrap_or(0)
+            .saturating_mul(10)
+            .saturating_add(digit);
         self.count = Some(n);
     }
 }
@@ -231,7 +235,10 @@ impl App {
     pub fn split_window(&mut self, dir: SplitDir) {
         let current = self.windows[self.focus];
         let new_window = self.windows.len();
-        self.windows.push(Window { scroll: 0, ..current });
+        self.windows.push(Window {
+            scroll: 0,
+            ..current
+        });
         if !self.layout.split_leaf(self.focus, dir, new_window) {
             self.windows.pop();
             return;
@@ -250,7 +257,8 @@ impl App {
             return;
         }
         self.windows.remove(closing);
-        self.layout.remap(&|id| if id > closing { id - 1 } else { id });
+        self.layout
+            .remap(&|id| if id > closing { id - 1 } else { id });
         self.focus = self.layout.leaves().first().copied().unwrap_or(0);
         let index = self.windows[self.focus].buffer;
         let _ = index;
@@ -638,9 +646,7 @@ impl App {
             KeyCode::Home | KeyCode::Char('0') => {
                 self.set_cursor(Pos::new(cursor.line, 0));
             }
-            KeyCode::End | KeyCode::Char('$') => {
-                self.motion(|doc, c| doc.move_line_end(c))
-            }
+            KeyCode::End | KeyCode::Char('$') => self.motion(|doc, c| doc.move_line_end(c)),
             KeyCode::Char('G') => {
                 let line = if had_count {
                     count
@@ -939,7 +945,6 @@ impl App {
         }
     }
 
-
     // ---- search --------------------------------------------------------
 
     fn start_search(&mut self) {
@@ -1019,7 +1024,10 @@ impl App {
         let found = self
             .document()
             .find_forward(from, &query, case_sensitive)
-            .or_else(|| self.document().find_forward(Pos::new(0, 0), &query, case_sensitive));
+            .or_else(|| {
+                self.document()
+                    .find_forward(Pos::new(0, 0), &query, case_sensitive)
+            });
         self.report_match(found, &query);
     }
 
@@ -1076,12 +1084,14 @@ impl App {
         if pos.col > 0 {
             Some(Pos::new(pos.line, pos.col - 1))
         } else if pos.line > 0 {
-            Some(Pos::new(pos.line - 1, self.document().line_len(pos.line - 1)))
+            Some(Pos::new(
+                pos.line - 1,
+                self.document().line_len(pos.line - 1),
+            ))
         } else {
             None
         }
     }
-
 
     // ---- substitute ----------------------------------------------------
 
@@ -1199,7 +1209,9 @@ impl App {
             }
             KeyCode::Char('n') => replacer.index += 1,
             KeyCode::Char('a') => {
-                replacer.approved.extend_from_slice(&replacer.matches[replacer.index..]);
+                replacer
+                    .approved
+                    .extend_from_slice(&replacer.matches[replacer.index..]);
                 replacer.index = replacer.matches.len();
             }
             KeyCode::Char('q') | KeyCode::Esc => replacer.index = replacer.matches.len(),
@@ -1224,7 +1236,11 @@ impl App {
         self.mode = Mode::Normal;
         let total = replacer.matches.len();
         let done = self.apply_replacements(&replacer.spec, &replacer.approved);
-        if let Some(pos) = replacer.approved.first().or_else(|| replacer.matches.first()) {
+        if let Some(pos) = replacer
+            .approved
+            .first()
+            .or_else(|| replacer.matches.first())
+        {
             self.set_cursor(*pos);
         }
         self.message = Some(format!("replaced {done} of {total} occurrences"));
@@ -1272,7 +1288,6 @@ impl App {
         }
         Outcome::Continue
     }
-
 
     // ---- window commands -----------------------------------------------
 
@@ -1815,7 +1830,10 @@ mod tests {
 
     #[test]
     fn follow_cursor_scrolls_only_when_needed() {
-        let text = (0..100).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let text = (0..100)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut app = app_with(&text);
         app.follow_cursor(10);
         assert_eq!(app.window_snapshot(app.focused_window()).unwrap().scroll, 0);
@@ -2134,7 +2152,11 @@ mod tests {
         assert!(app.message().unwrap().contains("replaced 2"));
 
         keys(&mut app, "u");
-        assert_eq!(app.document().line(0), "foo foo", "one undo step for the whole substitute");
+        assert_eq!(
+            app.document().line(0),
+            "foo foo",
+            "one undo step for the whole substitute"
+        );
     }
 
     #[test]
@@ -2201,7 +2223,11 @@ mod tests {
         app.set_area(80, 24);
         run_cmd(&mut app, "vsp");
         assert_eq!(app.window_rects().len(), 2);
-        assert_eq!(app.buffers().len(), 1, "a split does not open a second file");
+        assert_eq!(
+            app.buffers().len(),
+            1,
+            "a split does not open a second file"
+        );
 
         let right = app.focused_window();
         keys(&mut app, "j");
