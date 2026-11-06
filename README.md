@@ -39,7 +39,33 @@ Usable for real editing today:
 - files over 50 MB open read-only instead of becoming unresponsive
 - line endings and BOM preserved, atomic saves
 
-Still to come: a TOML configuration file (key bindings, theme, file types).
+## Configuration
+
+Optional, read from `~/.config/nyavim/config.toml` (or `$NYAVIM_CONFIG`). Everything has a default
+and a broken file only produces a warning.
+
+```toml
+[editor]
+tab_width = 4          # 1-16
+scroll_margin = 2      # lines kept around the cursor
+swap_seconds = 2       # how often a dirty buffer is mirrored
+read_only_mb = 50      # bigger files open read-only
+
+[theme]                # ANSI names or 0-255 indices
+keyword = "magenta"
+string = "green"
+comment = "darkgray"
+number = "yellow"
+type = "cyan"
+heading = "cyan"
+link = "blue"
+
+[filetypes]            # extension -> language, overrides the built-in detection
+py = "rust"
+```
+
+Key bindings are not configurable yet — that needs the key dispatch to become a data-driven action
+table first.
 
 The product definition lives in [`goal-and-requirements.md`](./goal-and-requirements.md).
 

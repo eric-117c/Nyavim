@@ -13,10 +13,6 @@ use ropey::Rope;
 
 const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
-/// Files larger than this open read-only: past this size every edit copies the buffer, and the
-/// honest thing is to say so instead of becoming unresponsive.
-pub const MAX_EDITABLE_BYTES: u64 = 50 * 1024 * 1024;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineEnding {
     Lf,
@@ -137,11 +133,8 @@ impl Document {
         doc
     }
 
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, LoadError> {
-        Self::open_with_limit(path, MAX_EDITABLE_BYTES)
-    }
-
-    /// Open with an explicit size limit, so tests do not have to build a 50 MB file.
+    /// Open a file, read-only when it is larger than `limit`. The limit comes from the user's
+    /// configuration, so this module never decides policy on its own.
     pub fn open_with_limit(path: impl AsRef<Path>, limit: u64) -> Result<Self, LoadError> {
         let path = path.as_ref();
         let bytes = fs::read(path)?;
@@ -857,7 +850,7 @@ mod tests {
         let path = dir.join("crlf.txt");
         fs::write(&path, b"\xEF\xBB\xBFone\r\ntwo\r\n").unwrap();
 
-        let mut doc = Document::open(&path).unwrap();
+        let mut doc = Document::open_with_limit(&path, u64::MAX).unwrap();
         assert_eq!(doc.line_ending(), LineEnding::Crlf);
         assert!(doc.has_bom());
         assert_eq!(doc.line_count(), 2);
@@ -880,7 +873,7 @@ mod tests {
         let path = dir.join("lf.txt");
         fs::write(&path, b"a\nb").unwrap();
 
-        let mut doc = Document::open(&path).unwrap();
+        let mut doc = Document::open_with_limit(&path, u64::MAX).unwrap();
         assert_eq!(doc.line_ending(), LineEnding::Lf);
         assert_eq!(doc.line_count(), 2);
         doc.save().unwrap();
@@ -895,7 +888,7 @@ mod tests {
         let copy = dir.join("copy.txt");
         fs::write(&original, b"hello\n").unwrap();
 
-        let mut doc = Document::open(&original).unwrap();
+        let mut doc = Document::open_with_limit(&original, u64::MAX).unwrap();
         let mut cursor = Pos::new(0, 0);
         doc.insert_char(&mut cursor, 'x');
         doc.remove(Pos::new(0, 0), Pos::new(0, 1));
@@ -927,7 +920,7 @@ mod tests {
         let dir = temp_dir("binary");
         let path = dir.join("blob.bin");
         fs::write(&path, [0xff, 0xfe, 0x00, 0x41]).unwrap();
-        let err = Document::open(&path).unwrap_err();
+        let err = Document::open_with_limit(&path, u64::MAX).unwrap_err();
         assert!(matches!(err, LoadError::NotUtf8));
         fs::remove_dir_all(&dir).unwrap();
     }

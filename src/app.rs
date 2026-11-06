@@ -8,6 +8,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
 use crate::command::{self, Command, Substitute};
+use crate::config::Config;
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
 use crate::git::{self, GitInfo};
 use crate::layout::{self, Layout, SplitDir};
@@ -122,6 +123,8 @@ pub struct App {
     swap_prompt: Option<String>,
     /// When the buffer was last mirrored to its swap file.
     last_swap_write: Option<std::time::Instant>,
+    /// User configuration; also the live source of tab width, scroll margin and swap interval.
+    config: Config,
     /// The shell session while the terminal owns the screen.
     terminal: Option<Session>,
     /// Commit message being typed after `:commit`.
@@ -155,6 +158,7 @@ impl App {
             insert_started: false,
             search: None,
             replacer: None,
+            config: Config::default(),
             swap_prompt: None,
             last_swap_write: None,
             terminal: None,
@@ -163,6 +167,18 @@ impl App {
             palette_query: String::new(),
             palette_selected: 0,
         }
+    }
+
+    pub fn set_config(&mut self, mut config: Config) {
+        if let Some(warning) = config.warnings.first().cloned() {
+            self.message = Some(format!("config: {warning}"));
+            config.warnings.clear();
+        }
+        self.config = config;
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     pub fn mode(&self) -> Mode {
@@ -251,7 +267,7 @@ impl App {
         let mut width = 0;
         for ch in text.chars() {
             let cell = if ch == '\t' {
-                crate::ui::TAB_WIDTH
+                self.config.tab_width
             } else {
                 unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
             };
@@ -658,7 +674,7 @@ impl App {
     /// Mirror a dirty buffer to its swap file at most every few seconds. Called from the event loop
     /// on idle ticks.
     pub fn tick(&mut self) {
-        const SWAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+        let interval = std::time::Duration::from_secs(self.config.swap_seconds.max(1));
         if self.swap_prompt.is_some() || !self.document().is_dirty() {
             return;
         }
@@ -667,7 +683,7 @@ impl App {
         };
         let due = self
             .last_swap_write
-            .is_none_or(|last| last.elapsed() >= SWAP_INTERVAL);
+            .is_none_or(|last| last.elapsed() >= interval);
         if !due {
             return;
         }
@@ -736,7 +752,7 @@ impl App {
 
     /// Language of the focused buffer, for the status line.
     pub fn language(&self) -> Language {
-        Language::detect(self.document().path())
+        self.config.language_for(self.document().path())
     }
 
     /// Keep the cursor inside the visible window, scrolling as little as possible.
@@ -745,7 +761,7 @@ impl App {
             return;
         }
         let line = self.cursor().line;
-        let margin = 2.min(visible / 2);
+        let margin = self.config.scroll_margin.min(visible / 2);
         if line < self.windows[self.focus].scroll + margin {
             self.windows[self.focus].scroll = line.saturating_sub(margin);
         } else if line + margin >= self.windows[self.focus].scroll + visible {
@@ -771,7 +787,7 @@ impl App {
         }
 
         let doc = if path.exists() {
-            match Document::open(path) {
+            match Document::open_with_limit(path, self.config.read_only_limit()) {
                 Ok(doc) => doc,
                 Err(err) => {
                     self.message = Some(match err {
@@ -2927,5 +2943,50 @@ mod tests {
             crate::swap::read(&path).is_none(),
             "saving removes the swap file"
         );
+    }
+
+    #[test]
+    fn configuration_changes_tab_width_and_theme() {
+        let dir = std::env::temp_dir().join(format!("nyavim-cfgapp-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml");
+        fs::write(
+            &cfg,
+            "[editor]\ntab_width = 8\n[theme]\nkeyword = \"red\"\n",
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        app.set_config(crate::config::Config::load_from(&cfg));
+        assert_eq!(app.config().tab_width, 8);
+        assert_eq!(app.config().theme.keyword, ratatui::style::Color::Red);
+        assert!(app.config().path.is_some());
+    }
+
+    #[test]
+    fn a_config_warning_is_reported_once() {
+        let dir = std::env::temp_dir().join(format!("nyavim-cfgwarn-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml");
+        fs::write(&cfg, "[theme]\nkeyword = \"chartreuse\"\n").unwrap();
+
+        let mut app = App::new();
+        app.set_config(crate::config::Config::load_from(&cfg));
+        assert!(app.message().unwrap().contains("config:"));
+    }
+
+    #[test]
+    fn filetype_overrides_drive_highlighting_language() {
+        let dir = std::env::temp_dir().join(format!("nyavim-cfgft-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml");
+        fs::write(&cfg, "[filetypes]\npy = \"rust\"\n").unwrap();
+        let file = dir.join("script.py");
+        fs::write(&file, "let x = 1;\n").unwrap();
+
+        let mut app = App::new();
+        app.set_config(crate::config::Config::load_from(&cfg));
+        app.open(&file);
+        assert_eq!(app.language(), crate::syntax::Language::Rust);
     }
 }

@@ -2,6 +2,7 @@
 
 mod app;
 mod command;
+mod config;
 mod document;
 mod git;
 mod layout;
@@ -32,6 +33,7 @@ const HINT_ROWS: u16 = 3;
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut app = App::new();
+    app.set_config(config::Config::load());
     if let Some(path) = args.first() {
         app.open(path);
     }

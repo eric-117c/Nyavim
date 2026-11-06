@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::command;
+use crate::config::Theme;
 use crate::layout::SplitDir;
 use crate::mode::Mode;
 use crate::syntax::{self, Language, TokenKind};
@@ -40,7 +41,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     match app.mode() {
         Mode::Palette => draw_palette(frame, rows[1], app),
-        Mode::Help => draw_help(frame, rows[1]),
+        Mode::Help => draw_help(frame, app),
         _ => {}
     }
 }
@@ -96,6 +97,8 @@ fn draw_body(frame: &mut Frame, _area: Rect, app: &App) {
                 mode: app.mode(),
                 highlight,
                 git: app.git_info_for(window.buffer),
+                theme: app.config().theme,
+                tab_width: app.config().tab_width,
             },
         );
     }
@@ -207,6 +210,8 @@ struct PaneView<'a> {
     mode: Mode,
     highlight: Option<(&'a str, bool)>,
     git: Option<&'a crate::git::GitInfo>,
+    theme: Theme,
+    tab_width: usize,
 }
 
 fn draw_window(frame: &mut Frame, area: Rect, view: &PaneView<'_>) {
@@ -217,6 +222,8 @@ fn draw_window(frame: &mut Frame, area: Rect, view: &PaneView<'_>) {
         mode,
         highlight,
         git,
+        theme,
+        tab_width,
     } = *view;
     let cursor = window.cursor;
     let height = area.height as usize;
@@ -272,7 +279,9 @@ fn draw_window(frame: &mut Frame, area: Rect, view: &PaneView<'_>) {
             format!("{:>number_width$} ", idx + 1, number_width = number_width),
             gutter_style,
         ));
-        spans.extend(line_spans(&text, cursor_col, &marks, &tokens));
+        spans.extend(line_spans(
+            &text, cursor_col, &marks, &tokens, theme, tab_width,
+        ));
         lines.push(Line::from(spans));
     }
 
@@ -298,20 +307,20 @@ fn mark_span(mark: crate::git::Mark, dirty: bool) -> Span<'static> {
 }
 
 /// Colour for a token, using the terminal's own palette so it follows the user's theme.
-fn token_style(kind: TokenKind) -> Style {
+fn token_style(kind: TokenKind, theme: Theme) -> Style {
     match kind {
         TokenKind::Keyword => Style::default()
-            .fg(Color::Magenta)
+            .fg(theme.keyword)
             .add_modifier(Modifier::BOLD),
-        TokenKind::String => Style::default().fg(Color::Green),
-        TokenKind::Comment => Style::default().fg(Color::DarkGray),
-        TokenKind::Number => Style::default().fg(Color::Yellow),
-        TokenKind::Type => Style::default().fg(Color::Cyan),
+        TokenKind::String => Style::default().fg(theme.string),
+        TokenKind::Comment => Style::default().fg(theme.comment),
+        TokenKind::Number => Style::default().fg(theme.number),
+        TokenKind::Type => Style::default().fg(theme.type_name),
         TokenKind::Heading => Style::default()
-            .fg(Color::Cyan)
+            .fg(theme.heading)
             .add_modifier(Modifier::BOLD),
         TokenKind::Link => Style::default()
-            .fg(Color::Blue)
+            .fg(theme.link)
             .add_modifier(Modifier::UNDERLINED),
     }
 }
@@ -339,6 +348,8 @@ fn line_spans(
     cursor_col: Option<usize>,
     marks: &[bool],
     tokens: &[(usize, usize, TokenKind)],
+    theme: Theme,
+    tab_width: usize,
 ) -> Vec<Span<'static>> {
     let caret = Style::default().add_modifier(Modifier::REVERSED);
     let mut token_kinds: Vec<Option<TokenKind>> = vec![None; text.chars().count()];
@@ -356,12 +367,12 @@ fn line_spans(
     let total = text.chars().count();
 
     for (idx, ch) in text.chars().enumerate() {
-        let base = token_kinds[idx].map(token_style);
+        let base = token_kinds[idx].map(|kind| token_style(kind, theme));
         let style = if Some(idx) == cursor_col {
             Some(caret)
         } else if marks.get(idx).copied().unwrap_or(false) {
             let foreground = token_kinds[idx]
-                .map(token_style)
+                .map(|kind| token_style(kind, theme))
                 .and_then(|style| style.fg)
                 .unwrap_or(Color::Black);
             Some(Style::default().fg(foreground).bg(Color::Yellow))
@@ -373,7 +384,7 @@ fn line_spans(
             run_style = style;
         }
         if ch == '\t' {
-            run.push_str(&" ".repeat(TAB_WIDTH));
+            run.push_str(&" ".repeat(tab_width));
         } else {
             run.push(ch);
         }
@@ -667,7 +678,7 @@ fn draw_palette(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The `F1` page: every key that works and every command that can be run.
-fn draw_help(frame: &mut Frame, _area: Rect) {
+fn draw_help(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let width = area.width.saturating_sub(6).clamp(30, 78);
     let entries = command::KEYS.len() + command::COMMANDS.len();
@@ -712,6 +723,13 @@ fn draw_help(frame: &mut Frame, _area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " Syntax highlighting follows the file extension; the status line shows what was detected.",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        match app.config().path.as_deref() {
+            Some(path) => format!(" Config: {}", path.display()),
+            None => " Config: none".to_owned(),
+        },
         Style::default().fg(Color::DarkGray),
     )));
 

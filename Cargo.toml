@@ -11,6 +11,8 @@ ropey = "1.6"
 unicode-width = "0.2"
 vt100 = "0.15"
 libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [profile.release]
 lto = true
