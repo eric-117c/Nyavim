@@ -54,6 +54,12 @@ pub const COMMANDS: &[Command] = &[
         keys: "/",
     },
     Command {
+        name: "search-backward",
+        aliases: &[],
+        description: "Search this file backwards as you type",
+        keys: "?",
+    },
+    Command {
         name: "search-next",
         aliases: &["n"],
         description: "Jump to the next match of the last search",
@@ -172,7 +178,8 @@ pub const KEYS: &[(&str, &str)] = &[
     ("dd cc yy", "the same, for whole lines"),
     ("x", "delete the character under the cursor"),
     ("u Ctrl+R", "undo / redo"),
-    ("/ n N", "search, next match, previous match"),
+    ("/ ?", "search forwards / backwards"),
+    ("n N", "next / previous match, wrapping around"),
     (
         ":s/old/new/g",
         "replace in this line (:%%s for the whole file, c to confirm)",

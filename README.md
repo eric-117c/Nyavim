@@ -29,7 +29,7 @@ Usable for real editing today:
 - visual mode and text objects (`diw`, `ci"`, `da(`), named registers (`"ay`, `"ap`)
 - command palette (`Ctrl+K`) and `:` command line sharing one registry, plus `F1` help
 - tabs and window splits (`:sp`, `:vsp`, `Ctrl+W` + `hjkl`)
-- incremental `/` search with match highlighting, `n`/`N`
+- incremental `/` and `?` search with match highlighting, `n`/`N`
 - `:s` / `:%s` literal substitute with `g` and `c` confirm
 - syntax highlighting for Rust, TOML, JSON, Markdown and shell (block comments and code fences carry
   across lines)

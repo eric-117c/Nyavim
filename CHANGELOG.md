@@ -12,7 +12,8 @@ Everything below is the same release; versions were not cut while the editor was
 - named registers (`"ay`, `"ap`) alongside the unnamed one
 
 ### Finding things
-- incremental `/` search with all matches highlighted, `n`/`N`, smart case
+- incremental `/` (forward) and `?` (backward) search with all matches highlighted, `n`/`N`
+  continuing in the search direction, smart case
 - `:s` / `:%s` literal substitute with `g` and per-match `c` confirmation
 - command palette (`Ctrl+K`) searching names *and* descriptions, sharing one registry with the `:`
   command line and the `F1` page
@@ -43,4 +44,5 @@ Everything below is the same release; versions were not cut while the editor was
 - key bindings are not configurable yet: the keymap is a hand-written dispatch that needs to become a
   data-driven action table first
 - no soft wrap or horizontal scrolling: long lines run off the screen
+- no `.` (repeat last change); splits are fixed at 50/50 and cannot be dragged
 - no file opener beyond `:e <path>`, no system clipboard, splits are fixed at 50/50

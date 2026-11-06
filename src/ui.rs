@@ -559,7 +559,7 @@ fn draw_hint_line(frame: &mut Frame, area: Rect, app: &App) {
 
     if matches!(app.mode(), Mode::Command | Mode::Search) {
         let (prefix, text) = if app.mode() == Mode::Search {
-            ("/", app.search_query())
+            (app.search_prefix(), app.search_query())
         } else {
             (":", app.command_line())
         };

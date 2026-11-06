@@ -38,6 +38,8 @@ struct Search {
     query: String,
     origin: Pos,
     origin_scroll: usize,
+    /// `/` searches forward, `?` searches backward; `n` keeps going that way.
+    forward: bool,
 }
 
 /// Where one view of a buffer is looking. Cursors and scrolling belong to the view, not the text:
@@ -536,6 +538,14 @@ impl App {
     /// Query text for the `/` prompt row.
     pub fn search_query(&self) -> &str {
         self.search.as_ref().map(|s| s.query.as_str()).unwrap_or("")
+    }
+
+    /// `/` or `?`, whichever started the search.
+    pub fn search_prefix(&self) -> &'static str {
+        match self.search.as_ref() {
+            Some(search) if !search.forward => "?",
+            _ => "/",
+        }
     }
 
     /// `(index of the match under the cursor, total, whether counting stopped early)`.
@@ -1040,7 +1050,8 @@ impl App {
             KeyCode::Char('"') => self.input.awaiting_register = true,
             KeyCode::Char('J') => self.join_lines(),
             KeyCode::Char('%') => self.jump_to_matching_bracket(),
-            KeyCode::Char('/') => self.start_search(),
+            KeyCode::Char('/') => self.start_search(true),
+            KeyCode::Char('?') => self.start_search(false),
             KeyCode::Char('n') => self.search_next(),
             KeyCode::Char('N') => self.search_previous(),
             _ => {}
@@ -1326,11 +1337,12 @@ impl App {
 
     // ---- search --------------------------------------------------------
 
-    fn start_search(&mut self) {
+    fn start_search(&mut self, forward: bool) {
         self.search = Some(Search {
             query: String::new(),
             origin: self.cursor(),
             origin_scroll: self.windows[self.focus].scroll,
+            forward,
         });
         self.mode = Mode::Search;
         self.message = None;
@@ -1380,38 +1392,42 @@ impl App {
             return;
         }
         let case_sensitive = is_case_sensitive(&search.query);
-        let found = self
-            .document()
-            .find_forward(search.origin, &search.query, case_sensitive)
-            .or_else(|| {
+        let found = if search.forward {
+            self.document()
+                .find_forward(search.origin, &search.query, case_sensitive)
+                .or_else(|| {
+                    self.document()
+                        .find_forward(Pos::new(0, 0), &search.query, case_sensitive)
+                })
+        } else {
+            // `?` looks behind the starting point, not at it
+            let behind = self.previous_position(search.origin).and_then(|from| {
                 self.document()
-                    .find_forward(Pos::new(0, 0), &search.query, case_sensitive)
+                    .find_backward(from, &search.query, case_sensitive)
             });
+            behind.or_else(|| {
+                let last = self.document().line_count().saturating_sub(1);
+                let end = Pos::new(last, self.document().line_len(last));
+                self.document()
+                    .find_backward(end, &search.query, case_sensitive)
+            })
+        };
         self.report_match(found, &search.query);
     }
 
     fn search_next(&mut self) {
-        let Some(query) = self.search.as_ref().map(|s| s.query.clone()) else {
-            self.message = Some("no search yet — press / to search".to_owned());
-            return;
-        };
-        if query.is_empty() {
-            return;
-        }
-        let case_sensitive = is_case_sensitive(&query);
-        let from = self.next_position(self.cursor());
-        let found = self
-            .document()
-            .find_forward(from, &query, case_sensitive)
-            .or_else(|| {
-                self.document()
-                    .find_forward(Pos::new(0, 0), &query, case_sensitive)
-            });
-        self.report_match(found, &query);
+        let forward = self.search.as_ref().is_none_or(|search| search.forward);
+        self.repeat_search(forward);
     }
 
     fn search_previous(&mut self) {
-        let Some(query) = self.search.as_ref().map(|s| s.query.clone()) else {
+        let forward = self.search.as_ref().is_none_or(|search| search.forward);
+        self.repeat_search(!forward);
+    }
+
+    /// `n`/`N`: continue the last search, wrapping around the buffer.
+    fn repeat_search(&mut self, forward: bool) {
+        let Some(query) = self.search.as_ref().map(|search| search.query.clone()) else {
             self.message = Some("no search yet — press / to search".to_owned());
             return;
         };
@@ -1420,20 +1436,23 @@ impl App {
         }
         let case_sensitive = is_case_sensitive(&query);
         let cursor = self.cursor();
-        let from = match self.previous_position(cursor) {
-            Some(pos) => pos,
-            None => return self.report_match(None, &query),
+        let found = if forward {
+            self.document()
+                .find_forward(self.next_position(cursor), &query, case_sensitive)
+                .or_else(|| {
+                    self.document()
+                        .find_forward(Pos::new(0, 0), &query, case_sensitive)
+                })
+        } else {
+            let from = self.previous_position(cursor);
+            let found =
+                from.and_then(|from| self.document().find_backward(from, &query, case_sensitive));
+            found.or_else(|| {
+                let last = self.document().line_count().saturating_sub(1);
+                let end = Pos::new(last, self.document().line_len(last));
+                self.document().find_backward(end, &query, case_sensitive)
+            })
         };
-        let found = self
-            .document()
-            .find_backward(from, &query, case_sensitive)
-            .or_else(|| {
-                let last = Pos::new(
-                    self.document().line_count() - 1,
-                    self.document().line_len(self.document().line_count() - 1),
-                );
-                self.document().find_backward(last, &query, case_sensitive)
-            });
         self.report_match(found, &query);
     }
 
@@ -2071,7 +2090,11 @@ impl App {
                 Outcome::Continue
             }
             "search" => {
-                self.start_search();
+                self.start_search(true);
+                Outcome::Continue
+            }
+            "search-backward" => {
+                self.start_search(false);
                 Outcome::Continue
             }
             "search-next" => {
@@ -3409,5 +3432,20 @@ mod tests {
         let mut app = app_with("first\nsecond\n");
         keys(&mut app, "J");
         assert_eq!(app.document().text(), "first second\n");
+    }
+
+    #[test]
+    fn question_mark_searches_backwards_and_n_keeps_going_back() {
+        let mut app = app_with("beta\nbeta\nbeta\n");
+        keys(&mut app, "G"); // last line
+        assert_eq!(app.cursor().line, 2);
+        keys(&mut app, "?beta");
+        assert_eq!(app.cursor().line, 1, "the search found the match above");
+        enter(&mut app);
+        keys(&mut app, "n");
+        assert_eq!(app.cursor().line, 0, "n continues backwards");
+        keys(&mut app, "N");
+        assert_eq!(app.cursor().line, 1, "N reverses direction");
+        assert_eq!(app.search_prefix(), "?");
     }
 }
