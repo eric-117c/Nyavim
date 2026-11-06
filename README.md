@@ -22,9 +22,18 @@ Written in Rust: one static binary, no runtime, no plugin runtime.
 
 ## Status
 
-Early development. The first usable slice (open → edit → save, tabs, command palette, vim subset,
-undo/redo) is being built; syntax highlighting, splits, search, git integration, a built-in terminal
-and TOML configuration come after.
+Usable for real editing today:
+
+- vim editing subset — motions, `d`/`c`/`y` with motions, `dd`/`cc`/`yy`, `p`/`P`, counts, insert
+  mode, undo/redo
+- command palette (`Ctrl+K`) and `:` command line sharing one registry, plus `F1` help
+- tabs and window splits (`:sp`, `:vsp`, `Ctrl+W` + `hjkl`)
+- incremental `/` search with match highlighting, `n`/`N`
+- `:s` / `:%s` literal substitute with `g` and `c` confirm
+- line endings and BOM preserved, atomic saves
+
+Still to come: syntax highlighting, git integration, a built-in terminal, TOML configuration, crash
+recovery (swap files), and the >50 MB read-only mode.
 
 The product definition lives in [`goal-and-requirements.md`](./goal-and-requirements.md).
 
