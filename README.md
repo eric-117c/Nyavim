@@ -34,9 +34,12 @@ Usable for real editing today:
   across lines)
 - git integration: changed-line gutter, branch in the status line, `:commit` with an inline message
 - a real shell on a pty, one keystroke away (`Ctrl+T`, back with `Ctrl+\`)
+- crash recovery: dirty buffers are mirrored to a swap file, offered back on the next open
+- mouse: click tabs to switch, click text to place the cursor, wheel to scroll
+- files over 50 MB open read-only instead of becoming unresponsive
 - line endings and BOM preserved, atomic saves
 
-Still to come: TOML configuration, crash recovery (swap files), and the >50 MB read-only mode.
+Still to come: a TOML configuration file (key bindings, theme, file types).
 
 The product definition lives in [`goal-and-requirements.md`](./goal-and-requirements.md).
 

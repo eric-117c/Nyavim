@@ -6,6 +6,7 @@ mod document;
 mod git;
 mod layout;
 mod mode;
+mod swap;
 mod syntax;
 mod terminal;
 mod ui;
@@ -14,6 +15,7 @@ use std::io;
 
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture, MouseEventKind};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -48,7 +50,7 @@ fn main() -> io::Result<()> {
 fn setup_terminal() -> io::Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
     // A panic must not leave the user with a wedged terminal.
     let previous_hook = std::panic::take_hook();
@@ -62,13 +64,17 @@ fn setup_terminal() -> io::Result<Tui> {
 
 fn restore_terminal(terminal: &mut Tui) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()
 }
 
 fn restore_terminal_direct() -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
 }
 
 /// Hand the screen to the shell and shuttle bytes until the user comes back.
@@ -163,12 +169,22 @@ fn run(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
         app.follow_cursor(visible);
         terminal.draw(|frame| ui::draw(frame, app))?;
 
+        if !event::poll(std::time::Duration::from_millis(250))? {
+            app.tick();
+            continue;
+        }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 if app.handle_key(key) == Outcome::Quit {
                     return Ok(());
                 }
             }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(_) => app.mouse_click(mouse.column, mouse.row),
+                MouseEventKind::ScrollUp => app.mouse_scroll(mouse.column, mouse.row, -3),
+                MouseEventKind::ScrollDown => app.mouse_scroll(mouse.column, mouse.row, 3),
+                _ => {}
+            },
             Event::Resize(_, _) => {}
             _ => {}
         }

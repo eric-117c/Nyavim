@@ -13,6 +13,10 @@ use ropey::Rope;
 
 const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
+/// Files larger than this open read-only: past this size every edit copies the buffer, and the
+/// honest thing is to say so instead of becoming unresponsive.
+pub const MAX_EDITABLE_BYTES: u64 = 50 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineEnding {
     Lf,
@@ -89,6 +93,7 @@ pub struct Document {
     /// because normal mode gathers a change per command rather than per keystroke.
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    read_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +119,7 @@ impl Document {
             saved_revision: 0,
             undo: Vec::new(),
             redo: Vec::new(),
+            read_only: false,
         }
     }
 
@@ -132,6 +138,11 @@ impl Document {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, LoadError> {
+        Self::open_with_limit(path, MAX_EDITABLE_BYTES)
+    }
+
+    /// Open with an explicit size limit, so tests do not have to build a 50 MB file.
+    pub fn open_with_limit(path: impl AsRef<Path>, limit: u64) -> Result<Self, LoadError> {
         let path = path.as_ref();
         let bytes = fs::read(path)?;
         let (has_bom, body) = match bytes.strip_prefix(BOM) {
@@ -143,6 +154,7 @@ impl Document {
         let mut doc = Self::from_text(text);
         doc.has_bom = has_bom;
         doc.path = Some(path.to_path_buf());
+        doc.read_only = (bytes.len() as u64) > limit;
         Ok(doc)
     }
 
@@ -159,6 +171,10 @@ impl Document {
                 .unwrap_or_else(|| path.to_string_lossy().into_owned()),
             None => "[No Name]".to_owned(),
         }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -293,6 +309,9 @@ impl Document {
 
     /// Remove and return the text between two positions. The cursor is the caller's business.
     pub fn remove(&mut self, a: Pos, b: Pos) -> String {
+        if self.read_only {
+            return String::new();
+        }
         let (a, b) = ordered(self.clamp_pos(a), self.clamp_pos(b));
         let (from, to) = (self.char_index(a), self.char_index(b));
         if from >= to {
@@ -306,7 +325,7 @@ impl Document {
 
     /// Insert text at a position without touching the cursor.
     pub fn insert_at(&mut self, pos: Pos, text: &str) {
-        if text.is_empty() {
+        if text.is_empty() || self.read_only {
             return;
         }
         let at = self.clamp_pos(pos);
@@ -316,6 +335,9 @@ impl Document {
     }
 
     pub fn insert_char(&mut self, cursor: &mut Pos, ch: char) {
+        if self.read_only {
+            return;
+        }
         let idx = self.char_index(*cursor);
         self.rope.insert_char(idx, ch);
         self.revision += 1;
@@ -361,7 +383,7 @@ impl Document {
     /// Works on raw rope lines so that deleting the last visible line of a file that ends with a
     /// newline removes that newline too instead of leaving a stray empty line behind.
     pub fn delete_line(&mut self, line: usize) -> String {
-        if line >= self.line_count() {
+        if self.read_only || line >= self.line_count() {
             return String::new();
         }
         let mut start = self.rope.line_to_char(line);
@@ -386,7 +408,7 @@ impl Document {
     /// Insert lines starting at `line`, as a linewise paste does. A `line` past the last line
     /// appends at the end of the buffer.
     pub fn insert_lines(&mut self, line: usize, lines: &[String]) {
-        if lines.is_empty() {
+        if lines.is_empty() || self.read_only {
             return;
         }
         let mut text = String::new();
@@ -631,9 +653,18 @@ impl Document {
         }
     }
 
+    /// Mark the buffer as having unsaved changes without touching its text, for "recovered from a
+    /// swap file" where the text is already what the user wants but is not what is on disk.
+    pub fn mark_dirty(&mut self) {
+        self.revision += 1;
+    }
+
     /// Replace the entire text in one operation, as a bulk substitute does. Callers take an undo
     /// checkpoint first.
     pub fn replace_all(&mut self, text: &str) {
+        if self.read_only {
+            return;
+        }
         self.rope = Rope::from_str(text);
         self.revision += 1;
     }

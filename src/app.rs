@@ -12,6 +12,7 @@ use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
 use crate::git::{self, GitInfo};
 use crate::layout::{self, Layout, SplitDir};
 use crate::mode::Mode;
+use crate::swap;
 use crate::syntax::{self, Language, State};
 use crate::terminal::Session;
 
@@ -117,6 +118,10 @@ pub struct App {
     insert_started: bool,
     search: Option<Search>,
     replacer: Option<Replacer>,
+    /// Swap content waiting for a recover/discard answer.
+    swap_prompt: Option<String>,
+    /// When the buffer was last mirrored to its swap file.
+    last_swap_write: Option<std::time::Instant>,
     /// The shell session while the terminal owns the screen.
     terminal: Option<Session>,
     /// Commit message being typed after `:commit`.
@@ -150,6 +155,8 @@ impl App {
             insert_started: false,
             search: None,
             replacer: None,
+            swap_prompt: None,
+            last_swap_write: None,
             terminal: None,
             commit_message: String::new(),
             command_line: String::new(),
@@ -175,6 +182,88 @@ impl App {
         &mut self.buffers[idx]
     }
 
+    /// Which tab the given screen column falls on, mirroring the tab bar's layout.
+    fn tab_at(&self, x: u16) -> Option<usize> {
+        let mut start = 0u16;
+        for (index, doc) in self.buffers.iter().enumerate() {
+            let width = crate::ui::tab_label(doc).chars().count() as u16;
+            if x >= start && x < start + width {
+                return Some(index);
+            }
+            start += width + 1; // the separator cell
+        }
+        None
+    }
+
+    /// Left click: switch tabs, or focus the window that was clicked and put the cursor there.
+    pub fn mouse_click(&mut self, x: u16, y: u16) {
+        if y == 0 {
+            if let Some(index) = self.tab_at(x) {
+                self.refresh_git();
+                self.switch_to(index);
+            }
+            return;
+        }
+        let Some((id, rect)) = self.window_rects().into_iter().find(|(_, rect)| {
+            x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+        }) else {
+            return;
+        };
+        self.focus = id;
+        let Some(window) = self.windows.get(id).copied() else {
+            return;
+        };
+        let line = window.scroll + (y - rect.y) as usize;
+        if line >= self.document().line_count() {
+            return;
+        }
+        let column = self.column_at_screen_x(line, rect.x, x);
+        self.set_cursor(Pos::new(line, column));
+        self.clamp_cursor();
+    }
+
+    /// Wheel: scroll the window under the pointer without moving the cursor.
+    pub fn mouse_scroll(&mut self, x: u16, y: u16, delta: isize) {
+        let Some((id, _)) = self
+            .window_rects()
+            .into_iter()
+            .find(|(_, rect)| x >= rect.x && x < rect.x + rect.width && y >= rect.y)
+        else {
+            return;
+        };
+        let line_count = self.buffers[self.windows[id].buffer].line_count();
+        let max_top = line_count.saturating_sub(1);
+        let current = self.windows[id].scroll as isize;
+        self.windows[id].scroll = (current + delta).clamp(0, max_top as isize) as usize;
+        self.sync_highlight();
+    }
+
+    /// Character column under a screen x, accounting for the gutter and for wide characters/tabs.
+    fn column_at_screen_x(&self, line: usize, rect_x: u16, x: u16) -> usize {
+        let doc = self.document();
+        let number_width = crate::ui::digits(doc.line_count()).max(3);
+        let marks = if self.git_info().in_repo() { 1 } else { 0 };
+        let gutter = marks + number_width + 1;
+        let target = (x.saturating_sub(rect_x) as usize).saturating_sub(gutter);
+
+        let text = doc.line(line);
+        let mut column = 0;
+        let mut width = 0;
+        for ch in text.chars() {
+            let cell = if ch == '\t' {
+                crate::ui::TAB_WIDTH
+            } else {
+                unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+            };
+            if width + cell > target {
+                break;
+            }
+            width += cell;
+            column += 1;
+        }
+        column
+    }
+
     /// Cursor of the focused view.
     pub fn cursor(&self) -> Pos {
         self.windows[self.focus].cursor
@@ -198,6 +287,10 @@ impl App {
     }
 
     fn edit(&mut self, f: impl FnOnce(&mut Document, &mut Pos)) {
+        if self.document().is_read_only() {
+            self.message = Some("read-only: file is larger than 50 MB".to_owned());
+            return;
+        }
         let idx = self.windows[self.focus].buffer;
         let mut cursor = self.windows[self.focus].cursor;
         f(&mut self.buffers[idx], &mut cursor);
@@ -557,6 +650,52 @@ impl App {
     }
 
     /// Git state of the focused buffer.
+    /// Whether a recovered edit is waiting for an answer.
+    pub fn swap_prompt(&self) -> Option<&str> {
+        self.swap_prompt.as_deref()
+    }
+
+    /// Mirror a dirty buffer to its swap file at most every few seconds. Called from the event loop
+    /// on idle ticks.
+    pub fn tick(&mut self) {
+        const SWAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+        if self.swap_prompt.is_some() || !self.document().is_dirty() {
+            return;
+        }
+        let Some(path) = self.document().path().map(|path| path.to_path_buf()) else {
+            return;
+        };
+        let due = self
+            .last_swap_write
+            .is_none_or(|last| last.elapsed() >= SWAP_INTERVAL);
+        if !due {
+            return;
+        }
+        if swap::write(&path, &self.document().text()).is_ok() {
+            self.last_swap_write = Some(std::time::Instant::now());
+        }
+    }
+
+    fn answer_swap_prompt(&mut self, recover: bool) -> Outcome {
+        let Some(text) = self.swap_prompt.take() else {
+            return Outcome::Continue;
+        };
+        if let Some(path) = self.document().path().map(|path| path.to_path_buf()) {
+            swap::clear(&path);
+        }
+        if recover {
+            self.doc_mut().replace_all(&text);
+            self.doc_mut().mark_dirty();
+            let cursor = self.cursor();
+            self.doc_mut().checkpoint(cursor);
+            self.message = Some("recovered from swap file — :w to keep it".to_owned());
+        } else {
+            self.message = Some("swap file discarded".to_owned());
+        }
+        self.mode = Mode::Normal;
+        Outcome::Continue
+    }
+
     pub fn git_info(&self) -> &GitInfo {
         static EMPTY: GitInfo = GitInfo {
             branch: None,
@@ -659,6 +798,15 @@ impl App {
         self.input = InputState::default();
         self.windows[self.focus].cursor = Pos::default();
         self.windows[self.focus].scroll = 0;
+        self.last_swap_write = None;
+        if let Some(path) = self.document().path().map(|path| path.to_path_buf()) {
+            if let Some(text) = swap::read(&path) {
+                self.swap_prompt = Some(text);
+                self.message = Some(
+                    "unsaved changes from a previous session — (r)ecover (d)iscard".to_owned(),
+                );
+            }
+        }
     }
 
     /// True when the active buffer is the untouched `[No Name]` start-up buffer, which a newly
@@ -673,6 +821,10 @@ impl App {
     pub fn save(&mut self) {
         let result = self.doc_mut().save();
         if result.is_ok() {
+            if let Some(path) = self.document().path().map(|path| path.to_path_buf()) {
+                swap::clear(&path);
+                self.last_swap_write = None;
+            }
             self.refresh_git();
         }
         self.message = match result {
@@ -682,6 +834,13 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
+        if self.swap_prompt.is_some() {
+            return match key.code {
+                KeyCode::Char('r') => self.answer_swap_prompt(true),
+                KeyCode::Char('d') | KeyCode::Esc => self.answer_swap_prompt(false),
+                _ => Outcome::Continue,
+            };
+        }
         match self.mode {
             Mode::Normal => self.handle_normal(key),
             Mode::Insert => self.handle_insert(key),
@@ -898,6 +1057,10 @@ impl App {
     }
 
     fn delete_under_cursor(&mut self, count: usize) {
+        if self.document().is_read_only() {
+            self.message = Some("read-only: file is larger than 50 MB".to_owned());
+            return;
+        }
         let cursor = self.cursor();
         let at_last_char = cursor.col >= self.document().line_len(cursor.line)
             && cursor.line + 1 >= self.document().line_count();
@@ -929,6 +1092,10 @@ impl App {
 
     fn apply_operator(&mut self, op: Operator, key: KeyEvent) {
         self.input.operator = None;
+        if self.document().is_read_only() {
+            self.message = Some("read-only: file is larger than 50 MB".to_owned());
+            return;
+        }
         if key.code == KeyCode::Esc {
             return;
         }
@@ -1017,6 +1184,10 @@ impl App {
     }
 
     fn apply_linewise(&mut self, op: Operator, count: usize) {
+        if self.document().is_read_only() {
+            self.message = Some("read-only: file is larger than 50 MB".to_owned());
+            return;
+        }
         let line = self.cursor().line;
         let available = self.document().line_count().saturating_sub(line);
         let n = count.min(available.max(1));
@@ -1059,6 +1230,10 @@ impl App {
     }
 
     fn paste(&mut self, before: bool) {
+        if self.document().is_read_only() {
+            self.message = Some("read-only: file is larger than 50 MB".to_owned());
+            return;
+        }
         let Some(register) = self.register.clone() else {
             self.message = Some("nothing to paste yet".to_owned());
             return;
@@ -1755,7 +1930,14 @@ impl App {
                 ));
                 Outcome::Continue
             }
-            None => Outcome::Quit,
+            None => {
+                for doc in &self.buffers {
+                    if let Some(path) = doc.path() {
+                        swap::clear(path);
+                    }
+                }
+                Outcome::Quit
+            }
         }
     }
 }
@@ -2636,5 +2818,114 @@ mod tests {
         run_cmd(&mut app, "commit");
         assert_eq!(app.mode(), Mode::Normal);
         assert!(app.message().unwrap().contains("save the file first"));
+    }
+
+    #[test]
+    fn a_large_file_opens_read_only_and_refuses_edits() {
+        let dir = std::env::temp_dir().join(format!("nyavim-ro-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.txt");
+        fs::write(&path, "one two three four five\n").unwrap();
+
+        let mut doc = crate::document::Document::open_with_limit(&path, 4).unwrap();
+        assert!(doc.is_read_only());
+        let mut cursor = Pos::new(0, 0);
+        doc.insert_char(&mut cursor, 'x');
+        assert_eq!(
+            doc.text(),
+            "one two three four five\n",
+            "nothing was inserted"
+        );
+        assert!(!doc.is_dirty());
+
+        let writable = crate::document::Document::open_with_limit(&path, 1024).unwrap();
+        assert!(!writable.is_read_only());
+    }
+
+    #[test]
+    fn clicking_a_tab_switches_buffer_and_clicking_text_moves_the_cursor() {
+        let (mut app, path) = app_with_path("first\nsecond\n");
+        let other = path.with_file_name("clicked.txt");
+        fs::write(&other, "other\n").unwrap();
+        run_cmd(&mut app, &format!("e {}", other.display()));
+        app.set_area(60, 10);
+
+        // the first tab starts at column 0, so clicking 1 selects it
+        app.mouse_click(1, 0);
+        assert_eq!(app.active(), 0);
+        assert_eq!(app.document().display_name(), "buffer.txt");
+
+        // body starts on row 1; the gutter is 4 cells (3 digits + space)
+        app.mouse_click(4 + 2, 2);
+        assert_eq!(app.cursor(), Pos::new(1, 2));
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_window_under_the_pointer() {
+        let text = (0..50)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = app_with(&text);
+        app.set_area(60, 10);
+        app.follow_cursor(7);
+        app.mouse_scroll(5, 2, 3);
+        assert_eq!(app.window_snapshot(app.focused_window()).unwrap().scroll, 3);
+        app.mouse_scroll(5, 2, -10);
+        assert_eq!(app.window_snapshot(app.focused_window()).unwrap().scroll, 0);
+    }
+
+    #[test]
+    fn a_swap_file_offers_recovery_when_the_file_is_opened() {
+        let (_, path) = app_with_path("on disk\n");
+        crate::swap::write(&path, "recovered text\n").unwrap();
+
+        let mut reopened = App::new();
+        reopened.open(&path);
+        assert!(reopened.swap_prompt().is_some());
+        assert_eq!(
+            reopened.document().text(),
+            "on disk\n",
+            "nothing applied yet"
+        );
+
+        keys(&mut reopened, "r");
+        assert_eq!(reopened.document().text(), "recovered text\n");
+        assert!(reopened.document().is_dirty());
+        assert!(
+            crate::swap::read(&path).is_none(),
+            "the swap file is consumed"
+        );
+    }
+
+    #[test]
+    fn discarding_a_swap_file_keeps_the_disk_version() {
+        let (_, path) = app_with_path("on disk\n");
+        crate::swap::write(&path, "ignored\n").unwrap();
+
+        let mut app = App::new();
+        app.open(&path);
+        keys(&mut app, "d");
+        assert_eq!(app.document().text(), "on disk\n");
+        assert!(!app.document().is_dirty());
+        assert!(crate::swap::read(&path).is_none());
+    }
+
+    #[test]
+    fn saving_a_dirty_buffer_clears_its_swap_file() {
+        let (mut app, path) = app_with_path("start\n");
+        keys(&mut app, "A!x");
+        esc(&mut app);
+        app.tick();
+        assert!(
+            crate::swap::read(&path).is_some(),
+            "a dirty buffer is mirrored"
+        );
+
+        run_cmd(&mut app, "w");
+        assert!(
+            crate::swap::read(&path).is_none(),
+            "saving removes the swap file"
+        );
     }
 }

@@ -45,6 +45,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
+/// Text of one tab, shared by the renderer and by mouse hit-testing so the two cannot drift.
+pub fn tab_label(doc: &crate::document::Document) -> String {
+    let dirty = if doc.is_dirty() { " ●" } else { "" };
+    format!(" {}{dirty} ", doc.display_name())
+}
+
 fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
     let active = Style::default()
         .fg(Color::Black)
@@ -55,8 +61,7 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut spans = Vec::new();
     for (idx, doc) in app.buffers().iter().enumerate() {
-        let dirty = if doc.is_dirty() { " ●" } else { "" };
-        let label = format!(" {}{dirty} ", doc.display_name());
+        let label = tab_label(doc);
         spans.push(Span::styled(
             label,
             if idx == app.active() {
@@ -430,6 +435,10 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
         format!("  {}", app.language().label()),
         Style::default().fg(Color::DarkGray),
     );
+    let read_only = Span::styled(
+        if doc.is_read_only() { "  RO" } else { "" },
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    );
     let branch = Span::styled(
         match app.git_info().branch.as_deref() {
             Some(name) => format!("  {name}"),
@@ -438,7 +447,16 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(Color::Blue),
     );
 
-    let mut spans = vec![mode, file, buffer_list, position, details, language, branch];
+    let mut spans = vec![
+        mode,
+        file,
+        buffer_list,
+        position,
+        details,
+        language,
+        read_only,
+        branch,
+    ];
     if let Some((index, total, capped)) = app.search_progress() {
         let capped = if capped { "+" } else { "" };
         let text = if index == 0 {
@@ -474,6 +492,21 @@ fn draw_hint_line(frame: &mut Frame, area: Rect, app: &App) {
             );
             return;
         }
+    }
+
+    if app.swap_prompt().is_some() {
+        let line = Line::from(vec![
+            Span::styled(
+                " recovered edits ",
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            ),
+            Span::styled("  (r)", Style::default().fg(Color::Cyan)),
+            Span::styled("ecover   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("(d)", Style::default().fg(Color::Cyan)),
+            Span::styled("iscard", Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
     }
 
     if app.mode() == Mode::CommitMsg {
@@ -696,7 +729,8 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn digits(n: usize) -> usize {
+/// Digits needed for line numbers, shared with the click mapping.
+pub fn digits(n: usize) -> usize {
     let mut n = n.max(1);
     let mut count = 0;
     while n > 0 {
