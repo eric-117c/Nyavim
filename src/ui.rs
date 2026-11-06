@@ -10,6 +10,7 @@ use crate::app::App;
 use crate::command;
 use crate::layout::SplitDir;
 use crate::mode::Mode;
+use crate::syntax::{self, Language, TokenKind};
 
 /// Width of the command-name column in the palette.
 const NAME_WIDTH: usize = 14;
@@ -121,6 +122,7 @@ fn draw_window(
         return;
     }
     let number_width = digits(doc.line_count()).max(3);
+    let language = Language::detect(doc.path());
 
     let top = window.scroll.min(doc.line_count().saturating_sub(1));
     let bottom = (top + height).min(doc.line_count());
@@ -136,9 +138,13 @@ fn draw_window(
         Style::default().fg(Color::DarkGray)
     };
 
+    let mut state = window.highlight;
     let mut lines = Vec::with_capacity(height);
     for idx in top..bottom {
         let text = doc.line(idx);
+        let (tokens, next_state) = syntax::highlight_line(language, &text, state);
+        state = next_state;
+
         let cursor_col = if cursor_visible && idx == cursor.line {
             Some(cursor.col)
         } else {
@@ -155,11 +161,30 @@ fn draw_window(
             format!("{:>number_width$} ", idx + 1, number_width = number_width),
             gutter_style,
         )];
-        spans.extend(line_spans(&text, cursor_col, &marks));
+        spans.extend(line_spans(&text, cursor_col, &marks, &tokens));
         lines.push(Line::from(spans));
     }
 
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Colour for a token, using the terminal's own palette so it follows the user's theme.
+fn token_style(kind: TokenKind) -> Style {
+    match kind {
+        TokenKind::Keyword => Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+        TokenKind::String => Style::default().fg(Color::Green),
+        TokenKind::Comment => Style::default().fg(Color::DarkGray),
+        TokenKind::Number => Style::default().fg(Color::Yellow),
+        TokenKind::Type => Style::default().fg(Color::Cyan),
+        TokenKind::Heading => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        TokenKind::Link => Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::UNDERLINED),
+    }
 }
 
 /// Which characters of `text` belong to a search match, for highlighting.
@@ -175,11 +200,26 @@ fn marked_columns(text: &str, starts: &[usize], needle_len: usize) -> Vec<bool> 
     marks
 }
 
-/// Split one buffer line into spans: the cursor cell is reversed, matches are highlighted, and a
-/// caret is drawn when the cursor sits past the last character (insert mode at the end of a line).
-fn line_spans(text: &str, cursor_col: Option<usize>, marks: &[bool]) -> Vec<Span<'static>> {
+/// Split one buffer line into spans: tokens get their colour, the cursor cell is reversed, matches
+/// are highlighted, and a caret is drawn when the cursor sits past the last character.
+///
+/// Precedence is deliberate: syntax colour is the base, a search hit replaces its background, and
+/// the cursor sits on top of both so it never disappears.
+fn line_spans(
+    text: &str,
+    cursor_col: Option<usize>,
+    marks: &[bool],
+    tokens: &[(usize, usize, TokenKind)],
+) -> Vec<Span<'static>> {
     let caret = Style::default().add_modifier(Modifier::REVERSED);
-    let hit = Style::default().fg(Color::Black).bg(Color::Yellow);
+    let mut token_kinds: Vec<Option<TokenKind>> = vec![None; text.chars().count()];
+    let total_chars = token_kinds.len();
+    for (start, end, kind) in tokens {
+        let end = (*end).min(total_chars);
+        if *start < end {
+            token_kinds[*start..end].fill(Some(*kind));
+        }
+    }
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut run = String::new();
@@ -187,12 +227,17 @@ fn line_spans(text: &str, cursor_col: Option<usize>, marks: &[bool]) -> Vec<Span
     let total = text.chars().count();
 
     for (idx, ch) in text.chars().enumerate() {
+        let base = token_kinds[idx].map(token_style);
         let style = if Some(idx) == cursor_col {
             Some(caret)
         } else if marks.get(idx).copied().unwrap_or(false) {
-            Some(hit)
+            let foreground = token_kinds[idx]
+                .map(token_style)
+                .and_then(|style| style.fg)
+                .unwrap_or(Color::Black);
+            Some(Style::default().fg(foreground).bg(Color::Yellow))
         } else {
-            None
+            base
         };
         if style != run_style {
             flush(&mut spans, &mut run, run_style);
@@ -257,8 +302,12 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
         format!("  {ending}{}", if doc.has_bom() { "+BOM" } else { "" }),
         Style::default().fg(Color::DarkGray),
     );
+    let language = Span::styled(
+        format!("  {}", app.language().label()),
+        Style::default().fg(Color::DarkGray),
+    );
 
-    let mut spans = vec![mode, file, buffer_list, position, details];
+    let mut spans = vec![mode, file, buffer_list, position, details, language];
     if let Some((index, total, capped)) = app.search_progress() {
         let capped = if capped { "+" } else { "" };
         let text = if index == 0 {
@@ -479,6 +528,12 @@ fn draw_help(frame: &mut Frame, _area: Rect) {
         ]));
     }
 
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Syntax highlighting follows the file extension; the status line shows what was detected.",
+        Style::default().fg(Color::DarkGray),
+    )));
+
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -528,7 +583,7 @@ mod tests {
         out
     }
 
-    fn app_with(text: &str) -> App {
+    fn app_named(name: &str, text: &str) -> App {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -538,12 +593,16 @@ mod tests {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("shown.txt");
+        let path = dir.join(name);
         fs::write(&path, text).unwrap();
 
         let mut app = App::new();
         app.open(&path);
         app
+    }
+
+    fn app_with(text: &str) -> App {
+        app_named("shown.txt", text)
     }
 
     #[test]
@@ -691,6 +750,90 @@ mod tests {
         assert!(
             screen.matches("alpha").count() >= 2,
             "both panes show the buffer:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn rust_keywords_numbers_and_comments_are_coloured() {
+        use ratatui::style::Color;
+
+        let mut app = app_named("code.rs", "let x = 1; // note\n");
+        app.set_area(40, 8);
+        // put the caret on `x` so the keyword cell is not covered by the cursor
+        for _ in 0..4 {
+            app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char('l'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // gutter is 4 cells wide on row 1
+        assert_eq!(buffer[(4, 1)].symbol(), "l");
+        assert_eq!(
+            buffer[(4, 1)].style().fg,
+            Some(Color::Magenta),
+            "keyword is magenta"
+        );
+        assert_eq!(
+            buffer[(12, 1)].style().fg,
+            Some(Color::Yellow),
+            "the number is yellow"
+        );
+        assert_eq!(
+            buffer[(15, 1)].style().fg,
+            Some(Color::DarkGray),
+            "the comment is dim"
+        );
+    }
+
+    #[test]
+    fn a_block_comment_carries_down_to_later_lines() {
+        use ratatui::style::Color;
+
+        let mut app = app_named("code.rs", "let a = 1;\n/*\nstill comment\n*/ let y = 2;\n");
+        app.set_area(40, 8);
+        app.follow_cursor(5);
+
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // body rows start at y = 1, so buffer line 2 ("still comment") is row 3
+        assert_eq!(buffer[(4, 3)].symbol(), "s");
+        assert_eq!(
+            buffer[(4, 3)].style().fg,
+            Some(Color::DarkGray),
+            "the line after `/*` is inside the block comment"
+        );
+        // the line that closes the comment is comment up to `*/`, then code again
+        assert_eq!(buffer[(4, 4)].symbol(), "*");
+        assert_eq!(buffer[(4, 4)].style().fg, Some(Color::DarkGray));
+        assert_eq!(
+            buffer[(4 + 3, 4)].style().fg,
+            Some(Color::Magenta),
+            "`let` after `*/` is a keyword again"
+        );
+    }
+
+    #[test]
+    fn plain_text_files_get_no_token_colour() {
+        use ratatui::style::Color;
+
+        let mut app = app_with("let x = 1;\n");
+        app.set_area(40, 8);
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_ne!(
+            buffer[(4, 1)].style().fg,
+            Some(Color::Magenta),
+            "unknown extensions stay unstyled"
         );
     }
 }

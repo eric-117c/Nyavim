@@ -5,6 +5,7 @@ mod command;
 mod document;
 mod layout;
 mod mode;
+mod syntax;
 mod ui;
 
 use std::io;

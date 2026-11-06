@@ -11,6 +11,7 @@ use crate::command::{self, Command, Substitute};
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
 use crate::layout::{self, Layout, SplitDir};
 use crate::mode::Mode;
+use crate::syntax::{self, Language, State};
 
 /// What the main loop should do after a key has been handled.
 #[derive(Debug, PartialEq, Eq)]
@@ -43,6 +44,11 @@ pub struct Window {
     pub buffer: usize,
     pub cursor: Pos,
     pub scroll: usize,
+    /// Highlight state at the first line on screen, kept up to date by [`App::follow_cursor`].
+    pub highlight: State,
+    /// Where the incremental state walk resumes from: the line and its state.
+    anchor_line: usize,
+    anchor_state: State,
 }
 
 /// A `c` substitute walking through its matches, collecting decisions before touching the buffer.
@@ -462,6 +468,44 @@ impl App {
         out
     }
 
+    /// Bring every window's highlight state up to its first visible line.
+    ///
+    /// The walk is incremental: normal scrolling only tokenizes the lines that scrolled into or out
+    /// of view. A jump so large that catching up would stall the frame restarts in the plain state
+    /// instead, which is why a `G` on a huge file can look unstyled until the next scroll.
+    fn sync_highlight(&mut self) {
+        const MAX_CATCH_UP_LINES: usize = 20_000;
+        let windows = &mut self.windows;
+        let buffers = &self.buffers;
+
+        for window in windows.iter_mut() {
+            let Some(doc) = buffers.get(window.buffer) else {
+                continue;
+            };
+            let language = Language::detect(doc.path());
+            let scroll = window.scroll;
+
+            if scroll < window.anchor_line || scroll - window.anchor_line > MAX_CATCH_UP_LINES {
+                window.anchor_line = scroll;
+                window.anchor_state = State::default();
+            }
+            while window.anchor_line < scroll {
+                window.anchor_state = syntax::state_after(
+                    language,
+                    &doc.line(window.anchor_line),
+                    window.anchor_state,
+                );
+                window.anchor_line += 1;
+            }
+            window.highlight = window.anchor_state;
+        }
+    }
+
+    /// Language of the focused buffer, for the status line.
+    pub fn language(&self) -> Language {
+        Language::detect(self.document().path())
+    }
+
     /// Keep the cursor inside the visible window, scrolling as little as possible.
     pub fn follow_cursor(&mut self, visible: usize) {
         if visible == 0 {
@@ -474,6 +518,7 @@ impl App {
         } else if line + margin >= self.windows[self.focus].scroll + visible {
             self.windows[self.focus].scroll = (line + margin + 1).saturating_sub(visible);
         }
+        self.sync_highlight();
     }
 
     /// Open `path` in its own buffer and show it, switching to the existing tab when the file is
