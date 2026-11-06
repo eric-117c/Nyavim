@@ -493,6 +493,77 @@ impl Document {
         self.clamp_normal();
     }
 
+    // ---- searching ----------------------------------------------------
+
+    /// First match at or after `from`, scanning forward without wrapping.
+    pub fn find_forward(&self, from: Pos, needle: &str, case_sensitive: bool) -> Option<Pos> {
+        let needle: Vec<char> = needle.chars().collect();
+        if needle.is_empty() {
+            return None;
+        }
+        let mut line = from.line;
+        while line < self.line_count() {
+            let cols = self.line_match_columns(line, &needle, case_sensitive);
+            let start = if line == from.line { from.col } else { 0 };
+            if let Some(&col) = cols.iter().find(|&&col| col >= start) {
+                return Some(Pos::new(line, col));
+            }
+            line += 1;
+        }
+        None
+    }
+
+    /// Last match at or before `from`, scanning backward without wrapping.
+    pub fn find_backward(&self, from: Pos, needle: &str, case_sensitive: bool) -> Option<Pos> {
+        let needle: Vec<char> = needle.chars().collect();
+        if needle.is_empty() || self.line_count() == 0 {
+            return None;
+        }
+        let mut line = from.line.min(self.line_count() - 1);
+        loop {
+            let cols = self.line_match_columns(line, &needle, case_sensitive);
+            let boundary = if line == from.line { Some(from.col) } else { None };
+            let found = cols
+                .iter()
+                .rev()
+                .find(|&&col| boundary.is_none_or(|bound| col <= bound));
+            if let Some(&col) = found {
+                return Some(Pos::new(line, col));
+            }
+            if line == 0 {
+                return None;
+            }
+            line -= 1;
+        }
+    }
+
+    /// Character columns where `needle` starts on `line`, left to right and non-overlapping.
+    pub fn find_all_in_line(&self, line: usize, needle: &str, case_sensitive: bool) -> Vec<usize> {
+        let needle: Vec<char> = needle.chars().collect();
+        self.line_match_columns(line, &needle, case_sensitive)
+    }
+
+    fn line_match_columns(&self, line: usize, needle: &[char], case_sensitive: bool) -> Vec<usize> {
+        let mut found = Vec::new();
+        if needle.is_empty() {
+            return found;
+        }
+        let chars: Vec<char> = self.line(line).chars().collect();
+        if chars.len() < needle.len() {
+            return found;
+        }
+        let mut col = 0;
+        while col + needle.len() <= chars.len() {
+            if matches_at(&chars, col, needle, case_sensitive) {
+                found.push(col);
+                col += needle.len();
+            } else {
+                col += 1;
+            }
+        }
+        found
+    }
+
     /// Move one character back, crossing to the end of the previous line. False at the start of
     /// the buffer.
     fn step_back_one(&mut self) -> bool {
@@ -626,6 +697,26 @@ fn char_class(ch: char) -> u8 {
     } else {
         2
     }
+}
+
+/// Does `needle` start at `col` in `chars`? Comparison is ASCII-aware so a match position always
+/// lines up with the character column model (`Ü` vs `ü` is not treated as equal).
+fn matches_at(chars: &[char], col: usize, needle: &[char], case_sensitive: bool) -> bool {
+    needle.iter().enumerate().all(|(offset, expected)| {
+        let actual = chars[col + offset];
+        if actual == *expected {
+            true
+        } else if case_sensitive {
+            false
+        } else {
+            actual.eq_ignore_ascii_case(expected)
+        }
+    })
+}
+
+/// Smart case: an all-lowercase query ignores case, any uppercase makes it exact.
+pub fn is_case_sensitive(query: &str) -> bool {
+    query.chars().any(char::is_uppercase)
 }
 
 #[cfg(test)]
@@ -855,4 +946,55 @@ mod tests {
         assert!(!doc.redo(), "a new change must drop the old redo path");
     }
 
+    #[test]
+    fn find_forward_scans_the_rest_of_the_buffer() {
+        let doc = Document::from_text("alpha beta\nbeta gamma\n");
+        assert_eq!(
+            doc.find_forward(Pos::new(0, 0), "beta", true),
+            Some(Pos::new(0, 6))
+        );
+        assert_eq!(
+            doc.find_forward(Pos::new(0, 7), "beta", true),
+            Some(Pos::new(1, 0))
+        );
+        assert_eq!(doc.find_forward(Pos::new(1, 1), "beta", true), None);
+    }
+
+    #[test]
+    fn find_backward_walks_up_to_the_start() {
+        let doc = Document::from_text("alpha beta\nbeta gamma\n");
+        assert_eq!(
+            doc.find_backward(Pos::new(1, 5), "beta", true),
+            Some(Pos::new(1, 0))
+        );
+        // inclusive: the match at the start position itself still counts
+        assert_eq!(
+            doc.find_backward(Pos::new(1, 0), "beta", true),
+            Some(Pos::new(1, 0))
+        );
+        assert_eq!(
+            doc.find_backward(Pos::new(0, 10), "beta", true),
+            Some(Pos::new(0, 6))
+        );
+        assert_eq!(doc.find_backward(Pos::new(0, 5), "beta", true), None);
+    }
+
+    #[test]
+    fn matches_are_non_overlapping_and_reported_per_line() {
+        let doc = Document::from_text("aaaa\n");
+        assert_eq!(doc.find_all_in_line(0, "aa", true), vec![0, 2]);
+        assert_eq!(doc.find_all_in_line(0, "a", true), vec![0, 1, 2, 3]);
+        assert!(doc.find_all_in_line(0, "b", true).is_empty());
+    }
+
+    #[test]
+    fn smart_case_only_ignores_case_for_lowercase_queries() {
+        assert!(!is_case_sensitive("beta"));
+        assert!(is_case_sensitive("Beta"));
+        assert!(is_case_sensitive("BETA"));
+
+        let doc = Document::from_text("Beta beta\n");
+        assert_eq!(doc.find_all_in_line(0, "beta", false), vec![0, 5]);
+        assert_eq!(doc.find_all_in_line(0, "beta", true), vec![5]);
+    }
 }
