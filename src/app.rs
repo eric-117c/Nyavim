@@ -6,7 +6,7 @@ use std::path::Path;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::command::{self, Command};
+use crate::command::{self, Command, Substitute};
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
 use crate::mode::Mode;
 
@@ -33,8 +33,19 @@ struct Search {
     origin_scroll: usize,
 }
 
-/// How many matches the status line bothers to count before it says "and more".
+/// A `c` substitute walking through its matches, collecting decisions before touching the buffer.
+#[derive(Debug)]
+struct Replacer {
+    spec: Substitute,
+    matches: Vec<Pos>,
+    index: usize,
+    approved: Vec<Pos>,
+}
+
+/// How many matches the status line bothers to count before it says "and more", and how many lines
+/// it scans looking for them. Both keep a keystroke responsive on a very large file.
 const MATCH_COUNT_CAP: usize = 5000;
+const MATCH_SCAN_LINES: usize = 20_000;
 
 /// The unnamed register plus how it was filled, which decides what `p` does.
 #[derive(Debug, Clone)]
@@ -76,6 +87,7 @@ pub struct App {
     /// Whether the current insert session has taken its undo checkpoint yet.
     insert_started: bool,
     search: Option<Search>,
+    replacer: Option<Replacer>,
     /// Text typed after `:`, without the colon.
     command_line: String,
     /// Text typed into the palette, and which of the matches is selected.
@@ -101,6 +113,7 @@ impl App {
             scroll: 0,
             insert_started: false,
             search: None,
+            replacer: None,
             command_line: String::new(),
             palette_query: String::new(),
             palette_selected: 0,
@@ -197,6 +210,18 @@ impl App {
         Some((&search.query, is_case_sensitive(&search.query)))
     }
 
+    /// The one-line question shown while a `c` substitute waits for an answer.
+    pub fn replace_prompt(&self) -> Option<String> {
+        let replacer = self.replacer.as_ref()?;
+        Some(format!(
+            "replace \"{}\" with \"{}\"?   (y)es (n)o (a)ll (q)uit   {}/{}",
+            replacer.spec.pattern,
+            replacer.spec.replacement,
+            replacer.index + 1,
+            replacer.matches.len()
+        ))
+    }
+
     /// Query text for the `/` prompt row.
     pub fn search_query(&self) -> &str {
         self.search.as_ref().map(|s| s.query.as_str()).unwrap_or("")
@@ -209,24 +234,20 @@ impl App {
             return None;
         }
         let case_sensitive = is_case_sensitive(&search.query);
+        let (matches, truncated) = self.document().scan_matches(
+            &search.query,
+            case_sensitive,
+            0,
+            MATCH_SCAN_LINES,
+            MATCH_COUNT_CAP,
+        );
         let cursor = self.document().cursor();
-        let mut index = 0;
-        let mut total = 0;
-        let mut capped = false;
-
-        'lines: for line in 0..self.document().line_count() {
-            for col in self.document().find_all_in_line(line, &search.query, case_sensitive) {
-                total += 1;
-                if Pos::new(line, col) == cursor {
-                    index = total;
-                }
-                if total >= MATCH_COUNT_CAP {
-                    capped = true;
-                    break 'lines;
-                }
-            }
-        }
-        Some((index, total, capped))
+        let index = matches
+            .iter()
+            .position(|pos| *pos == cursor)
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        Some((index, matches.len(), truncated))
     }
 
     pub fn palette_query(&self) -> &str {
@@ -352,6 +373,7 @@ impl App {
             Mode::Help => self.handle_help(key),
             Mode::Command => self.handle_command_line(key),
             Mode::Search => self.handle_search(key),
+            Mode::ReplaceConfirm => self.handle_replace_confirm(key),
             Mode::Palette => self.handle_palette(key),
         }
     }
@@ -898,6 +920,154 @@ impl App {
         }
     }
 
+
+    // ---- substitute ----------------------------------------------------
+
+    fn substitute(&mut self, spec: Substitute) -> Outcome {
+        let case_sensitive = is_case_sensitive(&spec.pattern);
+        let from_line = if spec.whole_file {
+            0
+        } else {
+            self.document().cursor().line
+        };
+        let max_lines = if spec.whole_file {
+            self.document().line_count()
+        } else {
+            1
+        };
+        let (scan, _) = self.document().scan_matches(
+            &spec.pattern,
+            case_sensitive,
+            from_line,
+            max_lines,
+            usize::MAX / 2,
+        );
+        let matches: Vec<Pos> = if spec.global {
+            scan
+        } else {
+            // without /g only the first match of each line counts
+            let mut firsts: Vec<Pos> = Vec::new();
+            for pos in scan {
+                if firsts.last().is_none_or(|prev| prev.line != pos.line) {
+                    firsts.push(pos);
+                }
+            }
+            firsts
+        };
+
+        if matches.is_empty() {
+            self.message = Some(format!("pattern not found: {}", spec.pattern));
+            return Outcome::Continue;
+        }
+
+        if spec.confirm {
+            self.doc_mut().set_cursor(matches[0]);
+            self.message = None;
+            self.replacer = Some(Replacer {
+                spec,
+                matches,
+                index: 0,
+                approved: Vec::new(),
+            });
+            self.mode = Mode::ReplaceConfirm;
+            return Outcome::Continue;
+        }
+
+        let total = matches.len();
+        let done = self.apply_replacements(&spec, &matches);
+        self.doc_mut().set_cursor(matches[0]);
+        self.message = Some(format!("replaced {done} of {total} occurrences"));
+        Outcome::Continue
+    }
+
+    /// Apply every replacement by rebuilding the buffer text once instead of editing the rope per
+    /// match: a whole-file substitute on a large file is thousands of edits otherwise.
+    fn apply_replacements(&mut self, spec: &Substitute, positions: &[Pos]) -> usize {
+        if positions.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        let width = spec.pattern.chars().count();
+        let text = self.document().text();
+
+        let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(positions.len());
+        let mut line_cursor = usize::MAX;
+        let mut line_start_byte = 0;
+        let mut line_text = String::new();
+        for pos in positions {
+            if pos.line != line_cursor {
+                line_cursor = pos.line;
+                line_text = self.document().line(pos.line);
+                let line_start_char = self.document().rope().line_to_char(pos.line);
+                line_start_byte = self.document().rope().char_to_byte(line_start_char);
+            }
+            let start = line_start_byte + byte_of_column(&line_text, pos.col);
+            let end = line_start_byte + byte_of_column(&line_text, pos.col + width);
+            ranges.push((start, end));
+        }
+
+        let mut out = String::with_capacity(text.len());
+        let mut last = 0;
+        for (start, end) in ranges {
+            if start < last || end > text.len() {
+                continue;
+            }
+            out.push_str(&text[last..start]);
+            out.push_str(&spec.replacement);
+            last = end;
+        }
+        out.push_str(&text[last..]);
+
+        self.doc_mut().replace_all(&out);
+        positions.len()
+    }
+
+    fn handle_replace_confirm(&mut self, key: KeyEvent) -> Outcome {
+        let Some(mut replacer) = self.replacer.take() else {
+            self.mode = Mode::Normal;
+            return Outcome::Continue;
+        };
+
+        match key.code {
+            KeyCode::Char('y') => {
+                if let Some(pos) = replacer.matches.get(replacer.index).copied() {
+                    replacer.approved.push(pos);
+                }
+                replacer.index += 1;
+            }
+            KeyCode::Char('n') => replacer.index += 1,
+            KeyCode::Char('a') => {
+                replacer.approved.extend_from_slice(&replacer.matches[replacer.index..]);
+                replacer.index = replacer.matches.len();
+            }
+            KeyCode::Char('q') | KeyCode::Esc => replacer.index = replacer.matches.len(),
+            _ => {}
+        }
+
+        if replacer.index < replacer.matches.len() {
+            let next = replacer.matches[replacer.index];
+            self.doc_mut().set_cursor(next);
+            self.replacer = Some(replacer);
+        } else {
+            self.replacer = Some(replacer);
+            self.finish_replace_confirm();
+        }
+        Outcome::Continue
+    }
+
+    fn finish_replace_confirm(&mut self) {
+        let Some(replacer) = self.replacer.take() else {
+            return;
+        };
+        self.mode = Mode::Normal;
+        let total = replacer.matches.len();
+        let done = self.apply_replacements(&replacer.spec, &replacer.approved);
+        if let Some(pos) = replacer.approved.first().or_else(|| replacer.matches.first()) {
+            self.doc_mut().set_cursor(*pos);
+        }
+        self.message = Some(format!("replaced {done} of {total} occurrences"));
+    }
+
     // ---- insert mode ---------------------------------------------------
 
     fn handle_insert(&mut self, key: KeyEvent) -> Outcome {
@@ -978,6 +1148,16 @@ impl App {
         if line.is_empty() {
             return Outcome::Continue;
         }
+        if command::looks_like_substitute(&line) {
+            return match command::parse_substitute(&line) {
+                Ok(spec) => self.substitute(spec),
+                Err(message) => {
+                    self.message = Some(message);
+                    Outcome::Continue
+                }
+            };
+        }
+
         let (word, arg) = match line.split_once(char::is_whitespace) {
             Some((word, arg)) => (word, arg.trim()),
             None => (line.as_str(), ""),
@@ -1010,6 +1190,10 @@ impl App {
                 } else {
                     Outcome::Quit
                 }
+            }
+            "substitute" => {
+                self.message = Some(command::SUBSTITUTE_USAGE.to_owned());
+                Outcome::Continue
             }
             "search" => {
                 self.start_search();
@@ -1129,6 +1313,14 @@ impl App {
             None => Outcome::Quit,
         }
     }
+}
+
+/// Byte offset of character column `col` in `text`.
+fn byte_of_column(text: &str, col: usize) -> usize {
+    text.char_indices()
+        .nth(col)
+        .map(|(byte, _)| byte)
+        .unwrap_or(text.len())
 }
 
 /// Walk `text` forward from `start` to get the position just after it.
@@ -1721,5 +1913,75 @@ mod tests {
         enter(&mut app);
         assert_eq!(app.mode(), Mode::Insert);
         assert_eq!(app.document().line_count(), 2);
+    }
+
+    #[test]
+    fn substitute_on_the_current_line_replaces_the_first_match() {
+        let mut app = app_with("foo foo\nfoo\n");
+        run_cmd(&mut app, "%s/foo/bar/");
+        assert_eq!(app.document().line(0), "bar foo");
+        assert_eq!(app.document().line(1), "bar");
+        assert!(app.message().unwrap().contains("replaced 2"));
+
+        keys(&mut app, "u");
+        assert_eq!(app.document().line(0), "foo foo", "one undo step for the whole substitute");
+    }
+
+    #[test]
+    fn global_substitute_replaces_every_match_on_every_line() {
+        let mut app = app_with("foo foo\nfoo\n");
+        run_cmd(&mut app, "%s/foo/bar/g");
+        assert_eq!(app.document().text(), "bar bar\nbar\n");
+    }
+
+    #[test]
+    fn substitute_without_percent_only_touches_the_current_line() {
+        let mut app = app_with("foo\nfoo\n");
+        run_cmd(&mut app, "s/foo/bar/");
+        assert_eq!(app.document().text(), "bar\nfoo\n");
+    }
+
+    #[test]
+    fn substitute_reports_a_missing_pattern() {
+        let mut app = app_with("alpha\n");
+        run_cmd(&mut app, "%s/zzz/x/g");
+        assert!(app.message().unwrap().contains("pattern not found"));
+        assert_eq!(app.document().text(), "alpha\n");
+    }
+
+    #[test]
+    fn confirm_substitute_asks_about_each_match() {
+        let mut app = app_with("a b a b\n");
+        run_cmd(&mut app, "%s/a/X/gc");
+        assert_eq!(app.mode(), Mode::ReplaceConfirm);
+        assert!(app.replace_prompt().unwrap().contains("1/2"));
+
+        keys(&mut app, "y");
+        assert!(app.replace_prompt().unwrap().contains("2/2"));
+        keys(&mut app, "n");
+
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.document().text(), "X b a b\n");
+        assert!(app.message().unwrap().contains("replaced 1 of 2"));
+    }
+
+    #[test]
+    fn confirm_substitute_can_accept_the_rest_with_a() {
+        let mut app = app_with("a a a\n");
+        run_cmd(&mut app, "%s/a/Z/gc");
+        keys(&mut app, "n");
+        keys(&mut app, "a");
+        assert_eq!(app.document().text(), "a Z Z\n");
+        assert!(app.message().unwrap().contains("replaced 2 of 3"));
+    }
+
+    #[test]
+    fn confirm_substitute_can_be_abandoned_with_q() {
+        let mut app = app_with("a a\n");
+        run_cmd(&mut app, "%s/a/Q/gc");
+        keys(&mut app, "y");
+        keys(&mut app, "q");
+        assert_eq!(app.document().text(), "Q a\n");
+        assert_eq!(app.mode(), Mode::Normal);
     }
 }

@@ -12,6 +12,8 @@ pub enum Mode {
     Help,
     /// Incremental `/` search prompt.
     Search,
+    /// `:%s/…/c` asking about one match at a time.
+    ReplaceConfirm,
 }
 
 impl Mode {
@@ -24,6 +26,7 @@ impl Mode {
             Mode::Palette => "PALETTE",
             Mode::Help => "HELP",
             Mode::Search => "SEARCH",
+            Mode::ReplaceConfirm => "REPLACE",
         }
     }
 }
@@ -41,6 +44,7 @@ mod tests {
             Mode::Palette.label(),
             Mode::Help.label(),
             Mode::Search.label(),
+            Mode::ReplaceConfirm.label(),
         ];
         for (i, a) in labels.iter().enumerate() {
             for b in &labels[i + 1..] {

@@ -102,8 +102,9 @@ fn marked_columns(text: &str, starts: &[usize], needle_len: usize) -> Vec<bool> 
     let total = text.chars().count();
     let mut marks = vec![false; total];
     for &start in starts {
-        for col in start..(start + needle_len).min(total) {
-            marks[col] = true;
+        let end = (start + needle_len).min(total);
+        for mark in &mut marks[start..end] {
+            *mark = true;
         }
     }
     marks
@@ -217,6 +218,19 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_hint_line(frame: &mut Frame, area: Rect, app: &App) {
+    if app.mode() == Mode::ReplaceConfirm {
+        if let Some(prompt) = app.replace_prompt() {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    prompt,
+                    Style::default().fg(Color::Yellow),
+                ))),
+                area,
+            );
+            return;
+        }
+    }
+
     if matches!(app.mode(), Mode::Command | Mode::Search) {
         let (prefix, text) = if app.mode() == Mode::Search {
             ("/", app.search_query())

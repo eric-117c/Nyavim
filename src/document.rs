@@ -216,6 +216,10 @@ impl Document {
         self.cursor = self.clamp(snapshot.cursor);
     }
 
+    pub fn rope(&self) -> &Rope {
+        &self.rope
+    }
+
     pub fn line_ending(&self) -> LineEnding {
         self.line_ending
     }
@@ -496,72 +500,90 @@ impl Document {
     // ---- searching ----------------------------------------------------
 
     /// First match at or after `from`, scanning forward without wrapping.
+    ///
+    /// Walks the rope with a sequential line iterator: `rope.line(i)` per line is ten times slower
+    /// on a large file, which is the difference between a responsive search and a stall.
     pub fn find_forward(&self, from: Pos, needle: &str, case_sensitive: bool) -> Option<Pos> {
-        let needle: Vec<char> = needle.chars().collect();
-        if needle.is_empty() {
+        if needle.is_empty() || from.line >= self.line_count() {
             return None;
         }
-        let mut line = from.line;
-        while line < self.line_count() {
-            let cols = self.line_match_columns(line, &needle, case_sensitive);
-            let start = if line == from.line { from.col } else { 0 };
-            if let Some(&col) = cols.iter().find(|&&col| col >= start) {
+        let lowered = lower_if_needed(needle, case_sensitive);
+        for (offset, slice) in self.rope.lines_at(from.line).enumerate() {
+            let line = from.line + offset;
+            if line >= self.line_count() {
+                break;
+            }
+            let start = if offset == 0 { from.col } else { 0 };
+            if let Some(col) = slice_matches(slice, needle, &lowered, case_sensitive)
+                .into_iter()
+                .find(|&col| col >= start)
+            {
                 return Some(Pos::new(line, col));
             }
-            line += 1;
         }
         None
     }
 
     /// Last match at or before `from`, scanning backward without wrapping.
     pub fn find_backward(&self, from: Pos, needle: &str, case_sensitive: bool) -> Option<Pos> {
-        let needle: Vec<char> = needle.chars().collect();
-        if needle.is_empty() || self.line_count() == 0 {
+        if needle.is_empty() {
             return None;
         }
-        let mut line = from.line.min(self.line_count() - 1);
-        loop {
-            let cols = self.line_match_columns(line, &needle, case_sensitive);
+        let lowered = lower_if_needed(needle, case_sensitive);
+        let mut best = None;
+        for (line, slice) in self.rope.lines().enumerate() {
+            if line > from.line || line >= self.line_count() {
+                break;
+            }
             let boundary = if line == from.line { Some(from.col) } else { None };
-            let found = cols
+            if let Some(&col) = slice_matches(slice, needle, &lowered, case_sensitive)
                 .iter()
                 .rev()
-                .find(|&&col| boundary.is_none_or(|bound| col <= bound));
-            if let Some(&col) = found {
-                return Some(Pos::new(line, col));
+                .find(|&&col| boundary.is_none_or(|bound| col <= bound))
+            {
+                best = Some(Pos::new(line, col));
             }
-            if line == 0 {
-                return None;
-            }
-            line -= 1;
         }
+        best
     }
 
     /// Character columns where `needle` starts on `line`, left to right and non-overlapping.
     pub fn find_all_in_line(&self, line: usize, needle: &str, case_sensitive: bool) -> Vec<usize> {
-        let needle: Vec<char> = needle.chars().collect();
-        self.line_match_columns(line, &needle, case_sensitive)
+        if needle.is_empty() || line >= self.line_count() {
+            return Vec::new();
+        }
+        let lowered = lower_if_needed(needle, case_sensitive);
+        slice_matches(self.rope.line(line), needle, &lowered, case_sensitive)
     }
 
-    fn line_match_columns(&self, line: usize, needle: &[char], case_sensitive: bool) -> Vec<usize> {
+    /// Every match in buffer order, starting at `from_line`, at most `max_lines` lines and `limit`
+    /// matches. `true` means the scan stopped at a limit rather than at the end of the buffer.
+    pub fn scan_matches(
+        &self,
+        needle: &str,
+        case_sensitive: bool,
+        from_line: usize,
+        max_lines: usize,
+        limit: usize,
+    ) -> (Vec<Pos>, bool) {
         let mut found = Vec::new();
-        if needle.is_empty() {
-            return found;
+        if needle.is_empty() || limit == 0 || from_line >= self.line_count() {
+            return (found, false);
         }
-        let chars: Vec<char> = self.line(line).chars().collect();
-        if chars.len() < needle.len() {
-            return found;
-        }
-        let mut col = 0;
-        while col + needle.len() <= chars.len() {
-            if matches_at(&chars, col, needle, case_sensitive) {
-                found.push(col);
-                col += needle.len();
-            } else {
-                col += 1;
+        let lowered = lower_if_needed(needle, case_sensitive);
+        for (offset, slice) in self.rope.lines_at(from_line).enumerate() {
+            let line = from_line + offset;
+            if offset >= max_lines || line >= self.line_count() {
+                break;
+            }
+            for col in slice_matches(slice, needle, &lowered, case_sensitive) {
+                found.push(Pos::new(line, col));
+                if found.len() >= limit {
+                    return (found, true);
+                }
             }
         }
-        found
+        (found, false)
     }
 
     /// Move one character back, crossing to the end of the previous line. False at the start of
@@ -625,6 +647,14 @@ impl Document {
                 _ => break,
             }
         }
+    }
+
+    /// Replace the entire text in one operation, as a bulk substitute does. Callers take an undo
+    /// checkpoint first.
+    pub fn replace_all(&mut self, text: &str) {
+        self.rope = Rope::from_str(text);
+        self.revision += 1;
+        self.cursor = self.clamp(self.cursor);
     }
 
     pub fn save(&mut self) -> io::Result<()> {
@@ -699,8 +729,82 @@ fn char_class(ch: char) -> u8 {
     }
 }
 
-/// Does `needle` start at `col` in `chars`? Comparison is ASCII-aware so a match position always
-/// lines up with the character column model (`Ü` vs `ü` is not treated as equal).
+/// Match columns of `needle` in one line, left to right and non-overlapping.
+///
+/// `lowered` is `needle` with ASCII bytes lowercased, prepared once per scan: lowering per line
+/// would mean an allocation per line.
+fn slice_matches(
+    slice: ropey::RopeSlice<'_>,
+    needle: &str,
+    lowered: &str,
+    case_sensitive: bool,
+) -> Vec<usize> {
+    let mut found = Vec::new();
+    if needle.is_empty() {
+        return found;
+    }
+
+    if let Some(text) = slice.as_str() {
+        return str_match_columns(text.trim_end_matches('\n'), needle, lowered, case_sensitive);
+    }
+
+    // A line straddling rope chunks: compare characters instead.
+    let needle_chars: Vec<char> = needle.chars().collect();
+    let mut chars: Vec<char> = slice.chars().collect();
+    if chars.last() == Some(&'\n') {
+        chars.pop();
+    }
+    let mut col = 0;
+    while col + needle_chars.len() <= chars.len() {
+        if matches_at(&chars, col, &needle_chars, case_sensitive) {
+            found.push(col);
+            col += needle_chars.len();
+        } else {
+            col += 1;
+        }
+    }
+    found
+}
+
+/// Match columns of `needle` in one line of UTF-8 text.
+fn str_match_columns(text: &str, needle: &str, lowered: &str, case_sensitive: bool) -> Vec<usize> {
+    let mut found = Vec::new();
+    let mut from = 0;
+    let mut col = 0;
+
+    if case_sensitive {
+        while let Some(offset) = text[from..].find(needle) {
+            let byte = from + offset;
+            col += text[from..byte].chars().count();
+            found.push(col);
+            let end = byte + needle.len();
+            col += text[byte..end].chars().count();
+            from = end;
+        }
+        return found;
+    }
+
+    let haystack = text.to_ascii_lowercase();
+    while let Some(offset) = haystack[from..].find(lowered) {
+        let byte = from + offset;
+        col += haystack[from..byte].chars().count();
+        found.push(col);
+        let end = byte + lowered.len();
+        col += haystack[byte..end].chars().count();
+        from = end;
+    }
+    found
+}
+
+fn lower_if_needed(needle: &str, case_sensitive: bool) -> String {
+    if case_sensitive {
+        String::new()
+    } else {
+        needle.to_ascii_lowercase()
+    }
+}
+
+/// Does `needle` start at `col` in `chars`? Used for lines that straddle rope chunks.
 fn matches_at(chars: &[char], col: usize, needle: &[char], case_sensitive: bool) -> bool {
     needle.iter().enumerate().all(|(offset, expected)| {
         let actual = chars[col + offset];
@@ -997,4 +1101,5 @@ mod tests {
         assert_eq!(doc.find_all_in_line(0, "beta", false), vec![0, 5]);
         assert_eq!(doc.find_all_in_line(0, "beta", true), vec![5]);
     }
+
 }

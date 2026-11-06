@@ -42,6 +42,12 @@ pub const COMMANDS: &[Command] = &[
         keys: ":wq",
     },
     Command {
+        name: "substitute",
+        aliases: &[],
+        description: "Replace text in this line, or in the whole file with %",
+        keys: ":s/old/new/[gc]",
+    },
+    Command {
         name: "search",
         aliases: &[],
         description: "Search this file as you type",
@@ -125,6 +131,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("x", "delete the character under the cursor"),
     ("u Ctrl+R", "undo / redo"),
     ("/ n N", "search, next match, previous match"),
+    (":s/old/new/g", "replace in this line (:%%s for the whole file, c to confirm)"),
     ("p P", "paste after / before the cursor"),
     (":", "command line"),
     ("Ctrl+K", "command palette"),
@@ -132,6 +139,71 @@ pub const KEYS: &[(&str, &str)] = &[
     ("F1", "this page"),
     ("Ctrl+Q", "quit"),
 ];
+
+/// A parsed `:s` / `:%s` line. Literal patterns only: no regex, no backreferences, and the
+/// delimiter itself cannot appear in the pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Substitute {
+    pub pattern: String,
+    pub replacement: String,
+    /// `:%s` — the whole buffer instead of the current line.
+    pub whole_file: bool,
+    /// `g` — every match on a line instead of the first one.
+    pub global: bool,
+    /// `c` — ask before each replacement.
+    pub confirm: bool,
+}
+
+pub const SUBSTITUTE_USAGE: &str = "usage: :s/pattern/replacement/[gc]  or  :%s/pattern/replacement/[gc]";
+
+/// Does this command line want the substitute parser rather than a named command?
+pub fn looks_like_substitute(line: &str) -> bool {
+    let rest = line.strip_prefix('%').unwrap_or(line);
+    let mut chars = rest.chars();
+    if chars.next() != Some('s') {
+        return false;
+    }
+    // `:s/…` yes; `:set` or `:sp` no.
+    matches!(chars.next(), Some(c) if !c.is_alphanumeric() && !c.is_whitespace())
+}
+
+pub fn parse_substitute(line: &str) -> Result<Substitute, String> {
+    let (whole_file, rest) = match line.strip_prefix('%') {
+        Some(rest) => (true, rest),
+        None => (false, line),
+    };
+    let rest = rest
+        .strip_prefix('s')
+        .ok_or_else(|| SUBSTITUTE_USAGE.to_owned())?;
+    let delimiter = rest.chars().next().ok_or_else(|| SUBSTITUTE_USAGE.to_owned())?;
+    let body = &rest[delimiter.len_utf8()..];
+
+    let parts: Vec<&str> = body.split(delimiter).collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return Err(SUBSTITUTE_USAGE.to_owned());
+    }
+    if parts[0].is_empty() {
+        return Err("substitute needs a pattern".to_owned());
+    }
+    let flags = parts.get(2).copied().unwrap_or("");
+    let mut global = false;
+    let mut confirm = false;
+    for flag in flags.chars() {
+        match flag {
+            'g' => global = true,
+            'c' => confirm = true,
+            other => return Err(format!("unknown substitute flag: {other}")),
+        }
+    }
+
+    Ok(Substitute {
+        pattern: parts[0].to_owned(),
+        replacement: parts[1].to_owned(),
+        whole_file,
+        global,
+        confirm,
+    })
+}
 
 /// Resolve what the user typed after `:` to a command.
 pub fn find(word: &str) -> Option<&'static Command> {
@@ -244,5 +316,40 @@ mod tests {
         let tight = fuzzy_score("writ", "write").unwrap();
         let loose = fuzzy_score("writ", "w r i t e").unwrap();
         assert!(tight > loose);
+    }
+    #[test]
+    fn substitute_parses_ranges_and_flags() {
+        let spec = parse_substitute("s/foo/bar/").unwrap();
+        assert_eq!(spec.pattern, "foo");
+        assert_eq!(spec.replacement, "bar");
+        assert!(!spec.whole_file && !spec.global && !spec.confirm);
+
+        let spec = parse_substitute("%s/a//gc").unwrap();
+        assert!(spec.whole_file && spec.global && spec.confirm);
+        assert_eq!(spec.replacement, "");
+    }
+
+    #[test]
+    fn substitute_accepts_any_delimiter_and_keeps_spaces_in_the_pattern() {
+        let spec = parse_substitute("%s#one two#three#g").unwrap();
+        assert_eq!(spec.pattern, "one two");
+        assert_eq!(spec.replacement, "three");
+    }
+
+    #[test]
+    fn substitute_rejects_bad_input() {
+        assert!(parse_substitute("s/only-pattern").is_err());
+        assert!(parse_substitute("s//new/").is_err());
+        assert!(parse_substitute("s/a/b/c/d").is_err());
+        assert!(parse_substitute("s/a/b/x").is_err());
+    }
+
+    #[test]
+    fn only_percent_s_and_s_with_a_delimiter_look_like_substitutes() {
+        assert!(looks_like_substitute("s/foo/bar/"));
+        assert!(looks_like_substitute("%s/foo/bar/"));
+        assert!(!looks_like_substitute("set"));
+        assert!(!looks_like_substitute("sp"));
+        assert!(!looks_like_substitute("write"));
     }
 }
