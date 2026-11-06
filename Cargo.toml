@@ -1,0 +1,16 @@
+[package]
+name = "nyavim"
+version = "0.1.0"
+edition = "2021"
+description = "A lightweight terminal text editor: vim's editing model, with every action discoverable"
+license = "MIT"
+
+[dependencies]
+ratatui = "0.29"
+ropey = "1.6"
+unicode-width = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
