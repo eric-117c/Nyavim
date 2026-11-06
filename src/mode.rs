@@ -16,6 +16,8 @@ pub enum Mode {
     ReplaceConfirm,
     /// `Ctrl+W` waiting for a window command.
     WindowCmd,
+    /// `:commit` asking for a message on the last line.
+    CommitMsg,
 }
 
 impl Mode {
@@ -30,6 +32,7 @@ impl Mode {
             Mode::Search => "SEARCH",
             Mode::ReplaceConfirm => "REPLACE",
             Mode::WindowCmd => "WINDOW",
+            Mode::CommitMsg => "COMMIT",
         }
     }
 }
@@ -49,6 +52,7 @@ mod tests {
             Mode::Search.label(),
             Mode::ReplaceConfirm.label(),
             Mode::WindowCmd.label(),
+            Mode::CommitMsg.label(),
         ];
         for (i, a) in labels.iter().enumerate() {
             for b in &labels[i + 1..] {

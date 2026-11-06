@@ -3,6 +3,7 @@
 mod app;
 mod command;
 mod document;
+mod git;
 mod layout;
 mod mode;
 mod syntax;

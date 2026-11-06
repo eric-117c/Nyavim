@@ -9,6 +9,7 @@ use ratatui::layout::Rect;
 
 use crate::command::{self, Command, Substitute};
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
+use crate::git::{self, GitInfo};
 use crate::layout::{self, Layout, SplitDir};
 use crate::mode::Mode;
 use crate::syntax::{self, Language, State};
@@ -102,6 +103,8 @@ pub struct App {
     message: Option<String>,
     buffers: Vec<Document>,
     /// One entry per pane; the layout tree decides where each is drawn.
+    /// Git view of each buffer, index-parallel with `buffers`.
+    git: Vec<GitInfo>,
     windows: Vec<Window>,
     layout: Layout,
     focus: usize,
@@ -113,6 +116,8 @@ pub struct App {
     insert_started: bool,
     search: Option<Search>,
     replacer: Option<Replacer>,
+    /// Commit message being typed after `:commit`.
+    commit_message: String,
     /// Text typed after `:`, without the colon.
     command_line: String,
     /// Text typed into the palette, and which of the matches is selected.
@@ -132,6 +137,7 @@ impl App {
             mode: Mode::Normal,
             message: None,
             buffers: vec![Document::empty()],
+            git: vec![GitInfo::default()],
             windows: vec![Window::default()],
             layout: Layout::leaf(0),
             focus: 0,
@@ -141,6 +147,7 @@ impl App {
             insert_started: false,
             search: None,
             replacer: None,
+            commit_message: String::new(),
             command_line: String::new(),
             palette_query: String::new(),
             palette_selected: 0,
@@ -309,6 +316,7 @@ impl App {
 
     fn switch_to(&mut self, idx: usize) {
         if idx < self.buffers.len() {
+            self.refresh_git();
             self.windows[self.focus].buffer = idx;
             self.windows[self.focus].cursor = Pos::default();
             self.windows[self.focus].scroll = 0;
@@ -348,6 +356,7 @@ impl App {
         }
         let closing = self.active();
         if self.buffers.len() == 1 {
+            self.git[0] = GitInfo::default();
             self.buffers[0] = Document::empty();
             for window in &mut self.windows {
                 window.buffer = 0;
@@ -356,6 +365,9 @@ impl App {
             }
         } else {
             self.buffers.remove(closing);
+            if closing < self.git.len() {
+                self.git.remove(closing);
+            }
             let last = self.buffers.len() - 1;
             let fallback = closing.min(last);
             for window in &mut self.windows {
@@ -501,6 +513,45 @@ impl App {
         }
     }
 
+    /// Git state of the focused buffer.
+    pub fn git_info(&self) -> &GitInfo {
+        static EMPTY: GitInfo = GitInfo {
+            branch: None,
+            head_lines: None,
+            marks: Vec::new(),
+        };
+        self.git.get(self.active()).unwrap_or(&EMPTY)
+    }
+
+    /// Git state of a specific buffer, for drawing that window's gutter.
+    pub fn git_info_for(&self, buffer: usize) -> Option<&GitInfo> {
+        self.git.get(buffer)
+    }
+
+    /// Commit message being typed, for the prompt row.
+    pub fn commit_message(&self) -> &str {
+        &self.commit_message
+    }
+
+    /// Ask git again: branch, HEAD content and marks.
+    fn refresh_git(&mut self) {
+        let index = self.active();
+        let path = self.document().path().map(|path| path.to_path_buf());
+        let text = self.document().text();
+        if let Some(slot) = self.git.get_mut(index) {
+            *slot = git::load(path.as_deref(), &text);
+        }
+    }
+
+    /// Recompute marks from the cached HEAD content, without starting a process.
+    fn recompute_marks(&mut self) {
+        let index = self.active();
+        let text = self.document().text();
+        if let Some(info) = self.git.get_mut(index) {
+            info.refresh_marks(&text);
+        }
+    }
+
     /// Language of the focused buffer, for the status line.
     pub fn language(&self) -> Language {
         Language::detect(self.document().path())
@@ -558,8 +609,10 @@ impl App {
         } else {
             self.buffers.push(doc);
             let new_index = self.buffers.len() - 1;
+            self.git.push(GitInfo::default());
             self.windows[self.focus].buffer = new_index;
         }
+        self.refresh_git();
         self.input = InputState::default();
         self.windows[self.focus].cursor = Pos::default();
         self.windows[self.focus].scroll = 0;
@@ -576,6 +629,9 @@ impl App {
 
     pub fn save(&mut self) {
         let result = self.doc_mut().save();
+        if result.is_ok() {
+            self.refresh_git();
+        }
         self.message = match result {
             Ok(()) => Some(format!("\"{}\" written", self.document().display_name())),
             Err(err) => Some(format!("save failed: {err}")),
@@ -591,6 +647,7 @@ impl App {
             Mode::Search => self.handle_search(key),
             Mode::ReplaceConfirm => self.handle_replace_confirm(key),
             Mode::WindowCmd => self.handle_window_command(key),
+            Mode::CommitMsg => self.handle_commit_message(key),
             Mode::Palette => self.handle_palette(key),
         }
     }
@@ -1308,6 +1365,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
+                self.recompute_marks();
                 let cursor = self.cursor();
                 if cursor.col > 0 {
                     let back = Pos::new(cursor.line, cursor.col - 1);
@@ -1332,6 +1390,59 @@ impl App {
             _ => {}
         }
         Outcome::Continue
+    }
+
+    // ---- commit message -------------------------------------------------
+
+    fn start_commit(&mut self) {
+        if !self.git_info().in_repo() {
+            self.message = Some("not a git repository".to_owned());
+            return;
+        }
+        if self.document().is_dirty() {
+            self.message = Some("save the file first — :w".to_owned());
+            return;
+        }
+        self.commit_message.clear();
+        self.mode = Mode::CommitMsg;
+    }
+
+    fn handle_commit_message(&mut self, key: KeyEvent) -> Outcome {
+        match key.code {
+            KeyCode::Esc => {
+                self.commit_message.clear();
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter => self.commit(),
+            KeyCode::Backspace => {
+                self.commit_message.pop();
+            }
+            KeyCode::Char(ch) => self.commit_message.push(ch),
+            _ => {}
+        }
+        Outcome::Continue
+    }
+
+    fn commit(&mut self) {
+        let text = std::mem::take(&mut self.commit_message);
+        self.mode = Mode::Normal;
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            self.message = Some("commit message is empty".to_owned());
+            return;
+        }
+        let path = self.document().path().map(|path| path.to_path_buf());
+        self.message = Some(match git::commit(path.as_deref(), &text) {
+            Ok(summary) => summary,
+            Err(err) => err,
+        });
+        if self
+            .message
+            .as_deref()
+            .is_some_and(|line| !line.contains("failed") && !line.contains("empty"))
+        {
+            self.refresh_git();
+        }
     }
 
     // ---- window commands -----------------------------------------------
@@ -1467,6 +1578,18 @@ impl App {
             }
             "redo" => {
                 self.redo();
+                Outcome::Continue
+            }
+            "git-commit" => {
+                self.start_commit();
+                Outcome::Continue
+            }
+            "git-refresh" => {
+                self.refresh_git();
+                self.message = Some(match self.git_info().branch.as_deref() {
+                    Some(branch) => format!("git refreshed (branch {branch})"),
+                    None => "not a git repository".to_owned(),
+                });
                 Outcome::Continue
             }
             "split" => {
@@ -2361,5 +2484,105 @@ mod tests {
         assert_eq!(app.buffers().len(), 1);
         assert_eq!(app.window_rects().len(), 2);
         assert_eq!(app.document().display_name(), "buffer.txt");
+    }
+
+    /// A throwaway git repository with one committed file.
+    fn repo_with_commit(name: &str, contents: &str) -> PathBuf {
+        use std::process::Command;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        let dir = std::env::temp_dir().join(format!(
+            "nyavim-git-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .expect("git must be installed for the test suite");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        let path = dir.join(name);
+        fs::write(&path, contents).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "initial"]);
+        path
+    }
+
+    #[test]
+    fn git_marks_compare_the_buffer_with_head() {
+        let path = repo_with_commit("tracked.txt", "one\ntwo\n");
+        let mut app = App::new();
+        app.open(&path);
+
+        assert_eq!(app.git_info().branch.as_deref(), Some("main"));
+        assert!(app
+            .git_info()
+            .marks
+            .iter()
+            .all(|mark| *mark == crate::git::Mark::Unchanged));
+
+        keys(&mut app, "A changed");
+        esc(&mut app);
+        assert_eq!(app.git_info().marks[0], crate::git::Mark::Modified);
+    }
+
+    #[test]
+    fn a_file_that_is_not_in_head_is_all_added() {
+        let path = repo_with_commit("tracked.txt", "one\n");
+        let dir = path.parent().unwrap().to_path_buf();
+        let fresh = dir.join("new.txt");
+        fs::write(&fresh, "a\nb\n").unwrap();
+
+        let mut app = App::new();
+        app.open(&fresh);
+        assert_eq!(app.git_info().marks, vec![crate::git::Mark::Added; 2]);
+    }
+
+    #[test]
+    fn commit_stages_tracked_changes_and_clears_the_marks() {
+        let path = repo_with_commit("tracked.txt", "one\n");
+        let mut app = App::new();
+        app.open(&path);
+        keys(&mut app, "A-two");
+        esc(&mut app);
+        run_cmd(&mut app, "w");
+
+        run_cmd(&mut app, "commit");
+        assert_eq!(app.mode(), Mode::CommitMsg);
+        for ch in "add two".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        enter(&mut app);
+
+        assert_eq!(app.mode(), Mode::Normal);
+        let message = app.message().unwrap().to_owned();
+        assert!(!message.contains("failed"), "commit failed: {message}");
+        assert!(
+            app.git_info()
+                .marks
+                .iter()
+                .all(|mark| *mark == crate::git::Mark::Unchanged),
+            "after committing there is nothing left to mark"
+        );
+    }
+
+    #[test]
+    fn commit_refuses_an_unsaved_buffer() {
+        let path = repo_with_commit("tracked.txt", "one\n");
+        let mut app = App::new();
+        app.open(&path);
+        keys(&mut app, "A-two");
+        esc(&mut app);
+        run_cmd(&mut app, "commit");
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.message().unwrap().contains("save the file first"));
     }
 }

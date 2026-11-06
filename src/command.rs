@@ -84,6 +84,18 @@ pub const COMMANDS: &[Command] = &[
         keys: ":e <path>",
     },
     Command {
+        name: "git-commit",
+        aliases: &["commit"],
+        description: "Stage tracked changes and commit them, with a message typed below",
+        keys: ":commit",
+    },
+    Command {
+        name: "git-refresh",
+        aliases: &[],
+        description: "Re-read the branch and the changed lines from git",
+        keys: ":git-refresh",
+    },
+    Command {
         name: "split",
         aliases: &["sp"],
         description: "Split this window, one above the other",
@@ -164,6 +176,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Ctrl+K", "command palette"),
     ("Ctrl+N Ctrl+P", "next / previous open file"),
     (":sp :vsp", "split this window above/below or side by side"),
+    (":commit", "type a message, then commit tracked changes"),
     (
         "Ctrl+W h j k l",
         "move focus to the window in that direction",

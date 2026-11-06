@@ -80,11 +80,14 @@ fn draw_body(frame: &mut Frame, _area: Rect, app: &App) {
         draw_window(
             frame,
             rect,
-            doc,
-            window,
-            id == focused,
-            app.mode(),
-            highlight,
+            &PaneView {
+                doc,
+                window,
+                focused: id == focused,
+                mode: app.mode(),
+                highlight,
+                git: app.git_info_for(window.buffer),
+            },
         );
     }
 
@@ -107,15 +110,25 @@ fn draw_separator(frame: &mut Frame, direction: SplitDir, area: Rect) {
     }
 }
 
-fn draw_window(
-    frame: &mut Frame,
-    area: Rect,
-    doc: &crate::document::Document,
-    window: &crate::app::Window,
+/// Everything one pane needs, bundled so the renderer keeps a readable signature.
+struct PaneView<'a> {
+    doc: &'a crate::document::Document,
+    window: &'a crate::app::Window,
     focused: bool,
     mode: Mode,
-    highlight: Option<(&str, bool)>,
-) {
+    highlight: Option<(&'a str, bool)>,
+    git: Option<&'a crate::git::GitInfo>,
+}
+
+fn draw_window(frame: &mut Frame, area: Rect, view: &PaneView<'_>) {
+    let PaneView {
+        doc,
+        window,
+        focused,
+        mode,
+        highlight,
+        git,
+    } = *view;
     let cursor = window.cursor;
     let height = area.height as usize;
     if height == 0 || area.width == 0 {
@@ -123,6 +136,7 @@ fn draw_window(
     }
     let number_width = digits(doc.line_count()).max(3);
     let language = Language::detect(doc.path());
+    let show_marks = git.is_some_and(|info| info.in_repo());
 
     let top = window.scroll.min(doc.line_count().saturating_sub(1));
     let bottom = (top + height).min(doc.line_count());
@@ -157,15 +171,41 @@ fn draw_window(
             }
             None => Vec::new(),
         };
-        let mut spans = vec![Span::styled(
+        let mut spans = Vec::new();
+        if show_marks {
+            spans.push(mark_span(
+                git.and_then(|info| info.marks.get(idx).copied())
+                    .unwrap_or(crate::git::Mark::Unchanged),
+                doc.is_dirty(),
+            ));
+        }
+        spans.push(Span::styled(
             format!("{:>number_width$} ", idx + 1, number_width = number_width),
             gutter_style,
-        )];
+        ));
         spans.extend(line_spans(&text, cursor_col, &marks, &tokens));
         lines.push(Line::from(spans));
     }
 
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// One gutter cell describing the line's change against HEAD.
+///
+/// When the buffer has unsaved edits the marks include those edits, so they are drawn bold to say
+/// "this is not only what is on disk".
+fn mark_span(mark: crate::git::Mark, dirty: bool) -> Span<'static> {
+    let (symbol, color) = match mark {
+        crate::git::Mark::Unchanged => (" ", Color::Reset),
+        crate::git::Mark::Added => ("+", Color::Green),
+        crate::git::Mark::Modified => ("~", Color::Yellow),
+        crate::git::Mark::RemovedAbove => ("_", Color::Red),
+    };
+    let mut style = Style::default().fg(color);
+    if dirty && mark != crate::git::Mark::Unchanged {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    Span::styled(symbol, style)
 }
 
 /// Colour for a token, using the terminal's own palette so it follows the user's theme.
@@ -306,8 +346,15 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App) {
         format!("  {}", app.language().label()),
         Style::default().fg(Color::DarkGray),
     );
+    let branch = Span::styled(
+        match app.git_info().branch.as_deref() {
+            Some(name) => format!("  {name}"),
+            None => String::new(),
+        },
+        Style::default().fg(Color::Blue),
+    );
 
-    let mut spans = vec![mode, file, buffer_list, position, details, language];
+    let mut spans = vec![mode, file, buffer_list, position, details, language, branch];
     if let Some((index, total, capped)) = app.search_progress() {
         let capped = if capped { "+" } else { "" };
         let text = if index == 0 {
@@ -343,6 +390,23 @@ fn draw_hint_line(frame: &mut Frame, area: Rect, app: &App) {
             );
             return;
         }
+    }
+
+    if app.mode() == Mode::CommitMsg {
+        let line = Line::from(vec![
+            Span::styled("commit ", Style::default().fg(Color::Cyan)),
+            Span::raw(app.commit_message().to_owned()),
+            Span::styled(
+                "\u{2588}",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ),
+            Span::styled(
+                "   Enter to commit · Esc to cancel",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
     }
 
     if matches!(app.mode(), Mode::Command | Mode::Search) {
@@ -834,6 +898,68 @@ mod tests {
             buffer[(4, 1)].style().fg,
             Some(Color::Magenta),
             "unknown extensions stay unstyled"
+        );
+    }
+
+    #[test]
+    fn the_gutter_shows_a_mark_for_changed_lines() {
+        use ratatui::style::Color;
+        use std::process::Command;
+
+        let dir = std::env::temp_dir().join(format!("nyavim-ui-git-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .expect("git must be installed");
+            assert!(status.success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        let path = dir.join("tracked.txt");
+        fs::write(&path, "one\ntwo\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "initial"]);
+
+        let mut app = App::new();
+        app.set_area(60, 8);
+        app.open(&path);
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('A'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        for ch in "-changed".chars() {
+            app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char(ch),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Esc,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        app.follow_cursor(5);
+
+        let backend = TestBackend::new(60, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // first cell of the body row is the change mark
+        assert_eq!(buffer[(0, 1)].symbol(), "~", "changed line is marked");
+        assert_eq!(buffer[(0, 1)].style().fg, Some(Color::Yellow));
+        assert_eq!(buffer[(0, 2)].symbol(), " ", "unchanged line has no mark");
+
+        let mut status = String::new();
+        for x in 0..60 {
+            status.push_str(buffer[(x, 6)].symbol());
+        }
+        assert!(
+            status.contains("main"),
+            "the branch is in the status line: {status}"
         );
     }
 }
