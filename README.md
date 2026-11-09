@@ -67,8 +67,16 @@ link = "blue"
 py = "rust"
 ```
 
-Key bindings are not configurable yet — that needs the key dispatch to become a data-driven action
-table first. The same gap means `.` (repeat) does not exist.
+Key bindings are configurable now; motions (`hjkl w b 0 $`), counts and text objects are the fixed
+vocabulary operators are built from.
+
+```toml
+[keys]
+"Ctrl+E" = "palette"
+"Q" = "quit"
+```
+
+Run names: every line of the `Actions` table on the `F1` page.
 
 Other known gaps: no system clipboard, and splits are fixed at 50/50 with no dragging.
 

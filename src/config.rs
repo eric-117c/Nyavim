@@ -51,6 +51,8 @@ pub struct Config {
     pub read_only_mb: u64,
     pub theme: Theme,
     pub filetypes: HashMap<String, Language>,
+    /// `[keys]` entries, applied to the binding table once it is built.
+    pub keys: Vec<(String, String)>,
     /// Problems found while reading the file, shown once in the status line.
     pub warnings: Vec<String>,
     pub path: Option<PathBuf>,
@@ -66,6 +68,7 @@ impl Default for Config {
             read_only_mb: 50,
             theme: Theme::default(),
             filetypes: HashMap::new(),
+            keys: Vec::new(),
             warnings: Vec::new(),
             path: None,
         }
@@ -149,6 +152,12 @@ impl Config {
             }
         }
 
+        if let Some(keys) = raw.keys {
+            let mut entries: Vec<(String, String)> = keys.into_iter().collect();
+            entries.sort();
+            config.keys = entries;
+        }
+
         if let Some(filetypes) = raw.filetypes {
             for (extension, language) in filetypes {
                 match parse_language(&language) {
@@ -202,6 +211,7 @@ struct Raw {
     editor: Option<RawEditor>,
     theme: Option<HashMap<String, String>>,
     filetypes: Option<HashMap<String, String>>,
+    keys: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -318,6 +328,19 @@ mod tests {
             config.language_for(Some(Path::new("main.rs"))),
             Language::Rust,
             "built-in detection still works"
+        );
+    }
+
+    #[test]
+    fn key_overrides_are_read_as_written() {
+        let path = write("keys", "[keys]\n\"Ctrl+E\" = \"palette\"\nQ = \"quit\"\n");
+        let config = Config::load_from(&path);
+        assert_eq!(
+            config.keys,
+            vec![
+                ("Ctrl+E".to_owned(), "palette".to_owned()),
+                ("Q".to_owned(), "quit".to_owned()),
+            ]
         );
     }
 

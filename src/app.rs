@@ -12,7 +12,7 @@ use crate::config::Config;
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
 use crate::finder;
 use crate::git::{self, GitInfo};
-use crate::keymap::{self, Action, InsertKind, Motion, Operator};
+use crate::keymap::{self, Action, Bindings, InsertKind, Motion, Operator};
 use crate::layout::{self, Layout, SplitDir};
 use crate::mode::Mode;
 use crate::swap;
@@ -147,6 +147,8 @@ pub struct App {
     last_swap_write: Option<std::time::Instant>,
     /// User configuration; also the live source of tab width, scroll margin and swap interval.
     config: Config,
+    /// Live binding table: defaults plus whatever `[keys]` asked for.
+    keymap: Bindings,
     /// The shell session while the terminal owns the screen.
     terminal: Option<Session>,
     /// Commit message being typed after `:commit`.
@@ -191,6 +193,7 @@ impl App {
             search: None,
             replacer: None,
             config: Config::default(),
+            keymap: Bindings::default(),
             swap_prompt: None,
             last_swap_write: None,
             terminal: None,
@@ -210,7 +213,17 @@ impl App {
             self.message = Some(format!("config: {warning}"));
             config.warnings.clear();
         }
+        self.keymap = Bindings::default();
+        self.keymap.apply_overrides(&config.keys);
+        if let Some(warning) = self.keymap.warnings().first().cloned() {
+            self.message = Some(format!("config: {warning}"));
+        }
         self.config = config;
+    }
+
+    /// The live binding table, for the help page.
+    pub fn bindings(&self) -> Vec<(String, Action)> {
+        self.keymap.entries()
     }
 
     pub fn config(&self) -> &Config {
@@ -960,7 +973,7 @@ impl App {
 
     fn handle_normal(&mut self, key: KeyEvent) -> Outcome {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(action) = keymap::ctrl_binding(key.code) {
+            if let Some(action) = self.keymap.action_for(key.code, true) {
                 return self.run_action(action);
             }
             return Outcome::Continue;
@@ -1032,7 +1045,7 @@ impl App {
         let cursor = self.cursor();
 
         // an operator keeps whatever count was typed (`2d…`) and waits for its motion
-        if let Some(Action::Operator(op)) = keymap::plain_binding(key.code) {
+        if let Some(Action::Operator(op)) = self.keymap.action_for(key.code, false) {
             self.input.operator = Some(op);
             return;
         }
@@ -1045,7 +1058,7 @@ impl App {
         }
 
         // one key, one self-contained action: the table owns these
-        if let Some(action) = keymap::plain_binding(key.code) {
+        if let Some(action) = self.keymap.action_for(key.code, false) {
             self.input.count = None;
             self.run_action(action);
             return;

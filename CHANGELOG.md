@@ -10,6 +10,9 @@ Everything below is the same release; versions were not cut while the editor was
 - visual mode (`v`, `o`, `d`/`c`/`y` on the selection)
 - text objects: `iw`/`aw`, and `i`/`a` with `"`, `'`, `` ` ``, `(`, `[`, `{`, `<`
 - named registers (`"ay`, `"ap`) alongside the unnamed one
+- `.` repeats the last change (operators with their motion, `x`, `p`, and insert sessions with the
+  text you typed)
+- key bindings are data: a `[keys]` table in the config rewrites them
 
 ### Finding things
 - incremental `/` (forward) and `?` (backward) search with all matches highlighted, `n`/`N`
@@ -42,8 +45,7 @@ Everything below is the same release; versions were not cut while the editor was
   and file types
 
 ### Known gaps
-- key bindings are not configurable yet: the keymap is a hand-written dispatch that needs to become a
-  data-driven action table first
+- motions, counts and text objects cannot be rebound (only whole actions can)
 - wrapping folds long lines by character width; a single line taller than the window still cannot be
   scrolled through row by row
 - no `.` (repeat last change); splits are fixed at 50/50 and cannot be dragged

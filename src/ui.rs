@@ -922,7 +922,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )));
-    for (label, action) in crate::keymap::bindings() {
+    for (label, action) in app.bindings() {
         lines.push(Line::from(vec![
             Span::raw(format!("  {label:<14}")),
             Span::styled(action.name(), Style::default().fg(Color::Gray)),
