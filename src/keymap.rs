@@ -23,6 +23,10 @@ pub enum Action {
     MatchBracket,
     SearchForward,
     SearchBackward,
+    Operator(Operator),
+    Insert(InsertKind),
+    DeleteChar,
+    Paste(bool),
 }
 
 /// A cursor movement. Motions are pure: given a cursor they return a new one, so the same table
@@ -63,6 +67,25 @@ pub fn motion_for(code: KeyCode) -> Option<Motion> {
     Some(motion)
 }
 
+/// An operator waiting for its motion or text object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Operator {
+    Delete,
+    Change,
+    Yank,
+}
+
+/// How `i`/`a`/`o` … enter insert mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InsertKind {
+    Here,
+    After,
+    LineStart,
+    LineEnd,
+    LineBelow,
+    LineAbove,
+}
+
 /// Actions reachable with `Ctrl` plus one key.
 pub fn ctrl_binding(code: KeyCode) -> Option<Action> {
     let action = match code {
@@ -88,6 +111,18 @@ pub fn plain_binding(code: KeyCode) -> Option<Action> {
         KeyCode::Char('%') => Action::MatchBracket,
         KeyCode::Char('/') => Action::SearchForward,
         KeyCode::Char('?') => Action::SearchBackward,
+        KeyCode::Char('d') => Action::Operator(Operator::Delete),
+        KeyCode::Char('c') => Action::Operator(Operator::Change),
+        KeyCode::Char('y') => Action::Operator(Operator::Yank),
+        KeyCode::Char('i') => Action::Insert(InsertKind::Here),
+        KeyCode::Char('a') => Action::Insert(InsertKind::After),
+        KeyCode::Char('I') => Action::Insert(InsertKind::LineStart),
+        KeyCode::Char('A') => Action::Insert(InsertKind::LineEnd),
+        KeyCode::Char('o') => Action::Insert(InsertKind::LineBelow),
+        KeyCode::Char('O') => Action::Insert(InsertKind::LineAbove),
+        KeyCode::Char('x') => Action::DeleteChar,
+        KeyCode::Char('p') => Action::Paste(false),
+        KeyCode::Char('P') => Action::Paste(true),
         _ => return None,
     };
     Some(action)
@@ -110,6 +145,10 @@ pub fn bindings() -> Vec<(&'static str, Action)> {
         ("%", Action::MatchBracket),
         ("/", Action::SearchForward),
         ("?", Action::SearchBackward),
+        ("d c y", Action::Operator(Operator::Delete)),
+        ("i a I A o O", Action::Insert(InsertKind::Here)),
+        ("x", Action::DeleteChar),
+        ("p P", Action::Paste(false)),
     ]
 }
 
@@ -131,6 +170,12 @@ impl Action {
             Action::MatchBracket => "match-bracket",
             Action::SearchForward => "search",
             Action::SearchBackward => "search-backward",
+            Action::Operator(Operator::Delete) => "delete",
+            Action::Operator(Operator::Change) => "change",
+            Action::Operator(Operator::Yank) => "yank",
+            Action::Insert(_) => "insert",
+            Action::DeleteChar => "delete-char",
+            Action::Paste(_) => "paste",
         }
     }
 }
@@ -151,13 +196,17 @@ mod tests {
     }
 
     #[test]
-    fn plain_bindings_do_not_shadow_insert_or_operator_keys() {
-        for reserved in ['i', 'a', 'o', 'd', 'c', 'y', 'p', 'x'] {
-            assert!(
-                plain_binding(KeyCode::Char(reserved)).is_none(),
-                "{reserved} must stay with the editing matcher"
-            );
-        }
+    fn editing_keys_are_bound_to_parameterised_actions() {
+        assert_eq!(
+            plain_binding(KeyCode::Char('d')),
+            Some(Action::Operator(Operator::Delete))
+        );
+        assert_eq!(
+            plain_binding(KeyCode::Char('o')),
+            Some(Action::Insert(InsertKind::LineBelow))
+        );
+        assert_eq!(plain_binding(KeyCode::Char('x')), Some(Action::DeleteChar));
+        assert_eq!(plain_binding(KeyCode::Char('P')), Some(Action::Paste(true)));
         assert_eq!(plain_binding(KeyCode::Char('u')), Some(Action::Undo));
     }
 

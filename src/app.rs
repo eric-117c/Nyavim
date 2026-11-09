@@ -12,7 +12,7 @@ use crate::config::Config;
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
 use crate::finder;
 use crate::git::{self, GitInfo};
-use crate::keymap::{self, Action, Motion};
+use crate::keymap::{self, Action, InsertKind, Motion, Operator};
 use crate::layout::{self, Layout, SplitDir};
 use crate::mode::Mode;
 use crate::swap;
@@ -24,13 +24,6 @@ use crate::terminal::Session;
 pub enum Outcome {
     Continue,
     Quit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Operator {
-    Delete,
-    Change,
-    Yank,
 }
 
 /// The search in flight or the last one, kept so `n`/`N` and the highlight keep working after the
@@ -1020,6 +1013,12 @@ impl App {
         let count = self.input.take_count();
         let cursor = self.cursor();
 
+        // an operator keeps whatever count was typed (`2d…`) and waits for its motion
+        if let Some(Action::Operator(op)) = keymap::plain_binding(key.code) {
+            self.input.operator = Some(op);
+            return;
+        }
+
         // motions come from the table, with the count the user typed
         if let Some(motion) = keymap::motion_for(key.code) {
             let target = self.apply_motion(cursor, motion, count);
@@ -1053,39 +1052,6 @@ impl App {
                 self.jump_to_line(line);
             }
             KeyCode::Char('g') => self.input.g_prefix = true,
-            KeyCode::Char('i') => self.enter_insert(),
-            KeyCode::Char('a') => {
-                self.move_cursor_right(1);
-                self.enter_insert();
-            }
-            KeyCode::Char('I') => {
-                self.set_cursor(Pos::new(cursor.line, 0));
-                self.enter_insert();
-            }
-            KeyCode::Char('A') => {
-                let end = self.document().line_len(cursor.line);
-                self.set_cursor(Pos::new(cursor.line, end));
-                self.enter_insert();
-            }
-            KeyCode::Char('o') => {
-                self.checkpoint();
-                self.insert_started = true;
-                let end = self.document().line_len(cursor.line);
-                self.set_cursor(Pos::new(cursor.line, end));
-                self.edit(|doc, c| doc.insert_newline(c));
-                self.enter_insert();
-            }
-            KeyCode::Char('O') => {
-                self.checkpoint();
-                self.insert_started = true;
-                self.set_cursor(Pos::new(cursor.line, 0));
-                self.edit(|doc, c| doc.insert_newline(c));
-                self.set_cursor(Pos::new(cursor.line, 0));
-                self.enter_insert();
-            }
-            KeyCode::Char('x') => self.delete_under_cursor(count),
-            KeyCode::Char('p') => self.paste(false),
-            KeyCode::Char('P') => self.paste(true),
             KeyCode::Char('"') => self.input.awaiting_register = true,
             KeyCode::Char('n') => self.search_next(),
             KeyCode::Char('N') => self.search_previous(),
@@ -1110,8 +1076,49 @@ impl App {
             Action::MatchBracket => self.jump_to_matching_bracket(),
             Action::SearchForward => self.start_search(true),
             Action::SearchBackward => self.start_search(false),
+            Action::Operator(op) => self.input.operator = Some(op),
+            Action::Insert(kind) => self.begin_insert(kind),
+            Action::DeleteChar => self.delete_under_cursor(1),
+            Action::Paste(before) => self.paste(before),
         }
         Outcome::Continue
+    }
+
+    /// Enter insert mode at the place the action asks for.
+    fn begin_insert(&mut self, kind: InsertKind) {
+        let line = self.cursor().line;
+        match kind {
+            InsertKind::Here => self.enter_insert(),
+            InsertKind::After => {
+                self.move_cursor_right(1);
+                self.enter_insert();
+            }
+            InsertKind::LineStart => {
+                self.set_cursor(Pos::new(line, 0));
+                self.enter_insert();
+            }
+            InsertKind::LineEnd => {
+                let end = self.document().line_len(line);
+                self.set_cursor(Pos::new(line, end));
+                self.enter_insert();
+            }
+            InsertKind::LineBelow => {
+                self.checkpoint();
+                self.insert_started = true;
+                let end = self.document().line_len(line);
+                self.set_cursor(Pos::new(line, end));
+                self.edit(|doc, cursor| doc.insert_newline(cursor));
+                self.enter_insert();
+            }
+            InsertKind::LineAbove => {
+                self.checkpoint();
+                self.insert_started = true;
+                self.set_cursor(Pos::new(line, 0));
+                self.edit(|doc, cursor| doc.insert_newline(cursor));
+                self.set_cursor(Pos::new(line, 0));
+                self.enter_insert();
+            }
+        }
     }
 
     fn enter_insert(&mut self) {
