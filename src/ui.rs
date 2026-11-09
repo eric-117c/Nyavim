@@ -12,7 +12,7 @@ use crate::config::Theme;
 use crate::document::Pos;
 use crate::layout::SplitDir;
 use crate::mode::Mode;
-use crate::syntax::{self, Language, TokenKind};
+use crate::syntax::{self, TokenKind};
 
 /// Width of the command-name column in the palette.
 const NAME_WIDTH: usize = 14;
@@ -45,6 +45,61 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Help => draw_help(frame, app),
         _ => {}
     }
+}
+
+/// Width of the line-number/change-marker column, shared with click mapping.
+pub fn gutter_width(doc: &crate::document::Document, marks: bool) -> usize {
+    digits(doc.line_count()).max(3) + 1 + usize::from(marks)
+}
+
+/// Where the line breaks when a line is too wide: character indexes of each screen row's first
+/// character. Tabs and wide characters are measured in cells.
+fn wrap_starts(text: &str, width: usize, tab_width: usize) -> Vec<usize> {
+    let mut starts = vec![0];
+    if width == 0 {
+        return starts;
+    }
+    let mut used = 0;
+    for (index, ch) in text.chars().enumerate() {
+        let cells = if ch == '\t' {
+            tab_width
+        } else {
+            unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+        };
+        if used + cells > width && index > 0 {
+            starts.push(index);
+            used = 0;
+        }
+        used += cells;
+    }
+    starts
+}
+
+/// Screen rows for the visible part of the buffer: `(buffer line, first character of the row)`.
+pub fn visible_rows(
+    doc: &crate::document::Document,
+    start_line: usize,
+    max_rows: usize,
+    width: usize,
+    tab_width: usize,
+    wrap: bool,
+) -> Vec<(usize, usize)> {
+    let mut rows = Vec::new();
+    let mut line = start_line.min(doc.line_count().saturating_sub(1));
+    while rows.len() < max_rows && line < doc.line_count() {
+        if wrap {
+            for start in wrap_starts(&doc.line(line), width, tab_width) {
+                rows.push((line, start));
+                if rows.len() >= max_rows {
+                    break;
+                }
+            }
+        } else {
+            rows.push((line, 0));
+        }
+        line += 1;
+    }
+    rows
 }
 
 /// Text of one tab, shared by the renderer and by mouse hit-testing so the two cannot drift.
@@ -101,6 +156,8 @@ fn draw_body(frame: &mut Frame, _area: Rect, app: &App) {
                 git: app.git_info_for(window.buffer),
                 theme: app.config().theme,
                 tab_width: app.config().tab_width,
+                wrap: app.config().wrap,
+                language: app.config().language_for(doc.path()),
             },
         );
     }
@@ -215,6 +272,8 @@ struct PaneView<'a> {
     git: Option<&'a crate::git::GitInfo>,
     theme: Theme,
     tab_width: usize,
+    wrap: bool,
+    language: crate::syntax::Language,
 }
 
 fn draw_window(frame: &mut Frame, area: Rect, view: &PaneView<'_>) {
@@ -228,18 +287,15 @@ fn draw_window(frame: &mut Frame, area: Rect, view: &PaneView<'_>) {
         git,
         theme,
         tab_width,
+        wrap,
+        language,
     } = *view;
     let cursor = window.cursor;
     let height = area.height as usize;
     if height == 0 || area.width == 0 {
         return;
     }
-    let number_width = digits(doc.line_count()).max(3);
-    let language = Language::detect(doc.path());
     let show_marks = git.is_some_and(|info| info.in_repo());
-
-    let top = window.scroll.min(doc.line_count().saturating_sub(1));
-    let bottom = (top + height).min(doc.line_count());
 
     let cursor_visible = focused
         && !matches!(
@@ -252,52 +308,111 @@ fn draw_window(frame: &mut Frame, area: Rect, view: &PaneView<'_>) {
         Style::default().fg(Color::DarkGray)
     };
 
+    let gutter = gutter_width(doc, show_marks);
+    let text_width = (area.width as usize).saturating_sub(gutter);
+    let rows = visible_rows(doc, window.scroll, height, text_width, tab_width, wrap);
+
     let mut state = window.highlight;
     let mut lines = Vec::with_capacity(height);
-    for idx in top..bottom {
-        let text = doc.line(idx);
-        let (tokens, next_state) = syntax::highlight_line(language, &text, state);
-        state = next_state;
+    let mut current_line = usize::MAX;
+    let mut line_text = String::new();
+    let mut tokens: Vec<(usize, usize, TokenKind)> = Vec::new();
+    let mut line_marks: Vec<bool> = Vec::new();
 
-        let cursor_col = if cursor_visible && idx == cursor.line {
-            Some(cursor.col)
+    for (row_index, (line, start)) in rows.iter().copied().enumerate() {
+        if line != current_line {
+            current_line = line;
+            line_text = doc.line(line);
+            let (parsed, next_state) = syntax::highlight_line(language, &line_text, state);
+            state = next_state;
+            tokens = parsed;
+            line_marks = match highlight {
+                Some((query, case_sensitive)) => {
+                    let cols = doc.find_all_in_line(line, query, case_sensitive);
+                    marked_columns(&line_text, &cols, query.chars().count())
+                }
+                None => Vec::new(),
+            };
+        }
+
+        let total_chars = line_text.chars().count();
+        let end = rows
+            .get(row_index + 1)
+            .filter(|(next_line, _)| *next_line == line)
+            .map(|(_, next_start)| *next_start)
+            .unwrap_or(total_chars);
+        let segment: String = line_text.chars().skip(start).take(end - start).collect();
+
+        let cursor_col = if cursor_visible && line == cursor.line && cursor.col >= start {
+            let at_line_end = cursor.col == total_chars && end == total_chars;
+            (cursor.col < end || at_line_end).then_some(cursor.col - start)
         } else {
             None
         };
-        let marks = match highlight {
-            Some((query, case_sensitive)) => {
-                let cols = doc.find_all_in_line(idx, query, case_sensitive);
-                marked_columns(&text, &cols, query.chars().count())
+
+        let segment_marks: Vec<bool> = line_marks
+            .iter()
+            .skip(start)
+            .take(end - start)
+            .copied()
+            .collect();
+        let segment_tokens: Vec<(usize, usize, TokenKind)> = tokens
+            .iter()
+            .filter_map(|(token_start, token_end, kind)| {
+                let from = (*token_start).max(start);
+                let to = (*token_end).min(end);
+                (from < to).then_some((from - start, to - start, *kind))
+            })
+            .collect();
+        let segment_selection = selection.and_then(|(sel_start, sel_end)| {
+            if line < sel_start.line || line > sel_end.line {
+                return None;
             }
-            None => Vec::new(),
-        };
-        let selected = selection.and_then(|(start, end)| {
-            if idx < start.line || idx > end.line {
-                None
+            let from = if line == sel_start.line {
+                sel_start.col
             } else {
-                let from = if idx == start.line { start.col } else { 0 };
-                let to = if idx == end.line {
-                    end.col
-                } else {
-                    text.chars().count()
-                };
-                Some((from, to))
-            }
+                0
+            };
+            let to = if line == sel_end.line {
+                sel_end.col
+            } else {
+                total_chars
+            };
+            let local_from = from.max(start);
+            let local_to = to.min(end);
+            (local_from < local_to).then_some((local_from - start, local_to - start))
         });
+
         let mut spans = Vec::new();
         if show_marks {
-            spans.push(mark_span(
-                git.and_then(|info| info.marks.get(idx).copied())
-                    .unwrap_or(crate::git::Mark::Unchanged),
-                doc.is_dirty(),
-            ));
+            if start == 0 {
+                spans.push(mark_span(
+                    git.and_then(|info| info.marks.get(line).copied())
+                        .unwrap_or(crate::git::Mark::Unchanged),
+                    doc.is_dirty(),
+                ));
+            } else {
+                spans.push(Span::raw(" "));
+            }
         }
-        spans.push(Span::styled(
-            format!("{:>number_width$} ", idx + 1, number_width = number_width),
-            gutter_style,
-        ));
+        let numbers = if start == 0 {
+            format!(
+                "{:>width$} ",
+                line + 1,
+                width = digits(doc.line_count()).max(3)
+            )
+        } else {
+            " ".repeat(gutter.saturating_sub(usize::from(show_marks)))
+        };
+        spans.push(Span::styled(numbers, gutter_style));
         spans.extend(line_spans(
-            &text, cursor_col, &marks, &tokens, theme, tab_width, selected,
+            &segment,
+            cursor_col,
+            &segment_marks,
+            &segment_tokens,
+            theme,
+            tab_width,
+            segment_selection,
         ));
         lines.push(Line::from(spans));
     }
@@ -780,7 +895,7 @@ pub fn digits(n: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::draw;
+    use super::{draw, visible_rows};
     use crate::app::App;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -1116,6 +1231,46 @@ mod tests {
         assert!(
             status.contains("main"),
             "the branch is in the status line: {status}"
+        );
+    }
+
+    #[test]
+    fn a_long_line_folds_into_several_rows() {
+        let doc = crate::document::Document::from_text("abc\ndefghijklmnop\nz\n");
+        let rows = visible_rows(&doc, 0, 10, 5, 4, true);
+        assert_eq!(
+            rows,
+            vec![(0, 0), (1, 0), (1, 5), (1, 10), (2, 0)],
+            "the 15-character line takes three 5-cell rows"
+        );
+
+        let nowrap = visible_rows(&doc, 0, 10, 5, 4, false);
+        assert_eq!(nowrap, vec![(0, 0), (1, 0), (2, 0)]);
+    }
+
+    #[test]
+    fn wrapping_stops_once_the_window_is_full() {
+        let doc = crate::document::Document::from_text("0123456789\n");
+        let rows = visible_rows(&doc, 0, 2, 4, 4, true);
+        assert_eq!(rows.len(), 2, "no more rows than the window can show");
+        assert_eq!(rows[1], (0, 4));
+    }
+
+    #[test]
+    fn a_wrapped_line_keeps_its_gutter_columns() {
+        let mut app = app_with("0123456789012345678901234567890123456789\n");
+        app.set_area(20, 8);
+        app.follow_cursor(5);
+        let screen = screen(&app, 20, 8);
+        // row 0 is the tab bar, so the first body row is index 1
+        let rows: Vec<&str> = screen.lines().take(4).collect();
+        assert!(
+            rows[1].contains("  1"),
+            "the first row is numbered: {rows:?}"
+        );
+        assert!(
+            !rows[2].contains("  2"),
+            "continuation rows carry no number: {rows:?}"
         );
     }
 }

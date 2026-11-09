@@ -43,6 +43,8 @@ impl Default for Theme {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub tab_width: usize,
+    /// Fold long lines onto the next screen row instead of letting them run off the edge.
+    pub wrap: bool,
     /// Lines kept visible above/below the cursor while scrolling.
     pub scroll_margin: usize,
     pub swap_seconds: u64,
@@ -58,6 +60,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             tab_width: crate::ui::TAB_WIDTH,
+            wrap: true,
             scroll_margin: 2,
             swap_seconds: 2,
             read_only_mb: 50,
@@ -112,6 +115,9 @@ impl Config {
                         .warnings
                         .push("tab_width must be between 1 and 16".to_owned()),
                 }
+            }
+            if let Some(wrap) = editor.wrap {
+                config.wrap = wrap;
             }
             if let Some(margin) = editor.scroll_margin {
                 config.scroll_margin = margin.min(20);
@@ -201,6 +207,7 @@ struct Raw {
 #[derive(Debug, Deserialize, Default)]
 struct RawEditor {
     tab_width: Option<usize>,
+    wrap: Option<bool>,
     scroll_margin: Option<usize>,
     swap_seconds: Option<u64>,
     read_only_mb: Option<u64>,

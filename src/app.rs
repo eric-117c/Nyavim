@@ -243,11 +243,22 @@ impl App {
         let Some(window) = self.windows.get(id).copied() else {
             return;
         };
-        let line = window.scroll + (y - rect.y) as usize;
-        if line >= self.document().line_count() {
+        let text_width = {
+            let gutter = crate::ui::gutter_width(self.document(), self.git_info().in_repo());
+            (rect.width as usize).saturating_sub(gutter)
+        };
+        let rows = crate::ui::visible_rows(
+            self.document(),
+            window.scroll,
+            rect.height as usize,
+            text_width,
+            self.config.tab_width,
+            self.config.wrap,
+        );
+        let Some((line, start)) = rows.get((y - rect.y) as usize).copied() else {
             return;
-        }
-        let column = self.column_at_screen_x(line, rect.x, x);
+        };
+        let column = self.column_at_screen_x(line, rect.x, x).max(start);
         self.set_cursor(Pos::new(line, column));
         self.clamp_cursor();
     }
@@ -777,6 +788,12 @@ impl App {
         self.config.language_for(self.document().path())
     }
 
+    /// Width available for buffer text in the focused window.
+    fn text_width(&self) -> usize {
+        let gutter = crate::ui::gutter_width(self.document(), self.git_info().in_repo());
+        (self.area.width as usize).saturating_sub(gutter)
+    }
+
     /// Keep the cursor inside the visible window, scrolling as little as possible.
     pub fn follow_cursor(&mut self, visible: usize) {
         if visible == 0 {
@@ -788,6 +805,28 @@ impl App {
             self.windows[self.focus].scroll = line.saturating_sub(margin);
         } else if line + margin >= self.windows[self.focus].scroll + visible {
             self.windows[self.focus].scroll = (line + margin + 1).saturating_sub(visible);
+        }
+        if self.config.wrap && visible > 0 {
+            let width = self.text_width();
+            let line = self.cursor().line;
+            let column = self.cursor().col;
+            for _ in 0..200 {
+                let rows = crate::ui::visible_rows(
+                    self.document(),
+                    self.windows[self.focus].scroll,
+                    visible,
+                    width,
+                    self.config.tab_width,
+                    true,
+                );
+                match rows
+                    .iter()
+                    .position(|(row_line, start)| *row_line == line && column >= *start)
+                {
+                    Some(index) if index + margin < visible => break,
+                    _ => self.windows[self.focus].scroll += 1,
+                }
+            }
         }
         self.sync_highlight();
     }
