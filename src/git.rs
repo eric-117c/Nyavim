@@ -38,15 +38,19 @@ pub fn load(path: Option<&Path>, buffer: &str) -> GitInfo {
     let Some(path) = path else {
         return GitInfo::default();
     };
-    let Some(dir) = path.parent() else {
+    // Compare canonical paths: a checkout reached through a symlink (macOS `/var`, a linked work
+    // directory) makes `rev-parse --show-toplevel` return the resolved path, and a naive
+    // `strip_prefix` would then fail and report every line as new.
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let Some(dir) = canonical.parent() else {
         return GitInfo::default();
     };
     let Some(root) = repo_root(dir) else {
         return GitInfo::default();
     };
-    let relative = path
+    let relative = canonical
         .strip_prefix(&root)
-        .unwrap_or(path)
+        .unwrap_or(&canonical)
         .to_string_lossy()
         .replace('\\', "/");
 
@@ -113,7 +117,8 @@ fn repo_root(dir: &Path) -> Option<PathBuf> {
     if text.is_empty() {
         None
     } else {
-        Some(PathBuf::from(text))
+        let path = PathBuf::from(text);
+        Some(std::fs::canonicalize(&path).unwrap_or(path))
     }
 }
 
