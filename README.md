@@ -37,6 +37,7 @@ Usable for real editing today:
 - a real shell on a pty, one keystroke away (`Ctrl+T`, back with `Ctrl+\`)
 - crash recovery: dirty buffers are mirrored to a swap file, offered back on the next open
 - mouse: click tabs to switch, click text to place the cursor, wheel to scroll
+- `Ctrl+P` picks a file from the project (fuzzy, reuses the palette matcher)
 - long lines wrap to the window width (`wrap` in the config turns it off)
 - files over 50 MB open read-only instead of becoming unresponsive
 - line endings and BOM preserved, atomic saves
@@ -69,8 +70,7 @@ py = "rust"
 Key bindings are not configurable yet — that needs the key dispatch to become a data-driven action
 table first. The same gap means `.` (repeat) does not exist.
 
-Other known gaps: no file opener beyond `:e <path>`, no system clipboard, and splits are fixed at
-50/50 with no dragging.
+Other known gaps: no system clipboard, and splits are fixed at 50/50 with no dragging.
 
 The product definition lives in [`goal-and-requirements.md`](./goal-and-requirements.md).
 

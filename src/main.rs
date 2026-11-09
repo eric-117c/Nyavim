@@ -4,6 +4,7 @@ mod app;
 mod command;
 mod config;
 mod document;
+mod finder;
 mod git;
 mod layout;
 mod mode;

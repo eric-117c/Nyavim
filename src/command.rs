@@ -90,6 +90,12 @@ pub const COMMANDS: &[Command] = &[
         keys: ":e <path>",
     },
     Command {
+        name: "find-file",
+        aliases: &["find", "open"],
+        description: "Pick a file from the project by typing part of its name",
+        keys: "Ctrl+P",
+    },
+    Command {
         name: "terminal",
         aliases: &["sh", "shell"],
         description: "Hand the screen to a shell; Ctrl+\\ comes back",
@@ -141,7 +147,7 @@ pub const COMMANDS: &[Command] = &[
         name: "prev-buffer",
         aliases: &["bp"],
         description: "Show the previous open file",
-        keys: "Ctrl+P",
+        keys: "Ctrl+B",
     },
     Command {
         name: "buffer-delete",
@@ -187,9 +193,10 @@ pub const KEYS: &[(&str, &str)] = &[
     ("p P", "paste after / before the cursor"),
     (":", "command line"),
     ("Ctrl+K", "command palette"),
-    ("Ctrl+N Ctrl+P", "next / previous open file"),
+    ("Ctrl+N Ctrl+B", "next / previous open file"),
     (":sp :vsp", "split this window above/below or side by side"),
     (":commit", "type a message, then commit tracked changes"),
+    ("Ctrl+P", "pick a file from this project"),
     ("Ctrl+T", "open a shell; Ctrl+\\ returns to the editor"),
     (
         "Ctrl+W h j k l",

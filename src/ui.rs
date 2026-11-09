@@ -42,6 +42,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     match app.mode() {
         Mode::Palette => draw_palette(frame, rows[1], app),
+        Mode::FindFile => draw_finder(frame, rows[1], app),
         Mode::Help => draw_help(frame, app),
         _ => {}
     }
@@ -713,6 +714,7 @@ fn draw_hint_line(frame: &mut Frame, area: Rect, app: &App) {
             ("Tab ", "indent"),
             ("Ctrl+K ", "palette"),
         ],
+        Mode::FindFile => &[("Enter ", "open"), ("Esc ", "cancel")],
         Mode::WindowCmd => &[
             ("h j k l ", "move focus"),
             ("w ", "cycle"),
@@ -808,6 +810,64 @@ fn draw_palette(frame: &mut Frame, area: Rect, app: &App) {
             }),
         ));
         lines.push(Line::from(row));
+    }
+    frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+/// The `Ctrl+P` picker: one line of query over the matching files.
+fn draw_finder(frame: &mut Frame, area: Rect, app: &App) {
+    let matches = app.finder_matches();
+    let width = area.width.saturating_sub(4).clamp(30, 90);
+    let height = (matches.len() as u16 + 3).min(area.height.max(4));
+    let overlay = centered(area, width, height);
+    frame.render_widget(Clear, overlay);
+
+    let block = Block::bordered().title(" Find file  ·  Enter opens, Esc closes ");
+    let inner = block.inner(overlay);
+    frame.render_widget(block, overlay);
+    if inner.height < 2 {
+        return;
+    }
+
+    let query_row = Rect { height: 1, ..inner };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Cyan)),
+            Span::raw(app.finder_query().to_owned()),
+            Span::styled(
+                "\u{2588}",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ),
+            Span::styled(
+                format!("   {} files", matches.len()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])),
+        query_row,
+    );
+
+    let list_area = Rect {
+        y: inner.y + 1,
+        height: inner.height - 1,
+        ..inner
+    };
+    let visible = list_area.height as usize;
+    let selected = app.finder_selected();
+    let offset = selected.saturating_sub(visible.saturating_sub(1));
+
+    let mut lines = Vec::new();
+    for (index, file) in matches.iter().enumerate().skip(offset).take(visible) {
+        let chosen = index == selected;
+        let style = if chosen {
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let text: String = file.chars().take(inner.width as usize - 1).collect();
+        lines.push(Line::from(Span::styled(format!(" {text}"), style)));
     }
     frame.render_widget(Paragraph::new(lines), list_area);
 }

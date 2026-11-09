@@ -15,7 +15,8 @@ Everything below is the same release; versions were not cut while the editor was
 - incremental `/` (forward) and `?` (backward) search with all matches highlighted, `n`/`N`
   continuing in the search direction, smart case
 - `:s` / `:%s` literal substitute with `g` and per-match `c` confirmation
-- command palette (`Ctrl+K`) searching names *and* descriptions, sharing one registry with the `:`
+- `Ctrl+P` file picker over the project, and `Ctrl+K` command palette searching names *and*
+  descriptions, sharing one registry with the `:`
   command line and the `F1` page
 
 ### Layout

@@ -22,6 +22,8 @@ pub enum Mode {
     Terminal,
     /// `v` character-wise selection.
     Visual,
+    /// `Ctrl+P` file picker.
+    FindFile,
 }
 
 impl Mode {
@@ -39,6 +41,7 @@ impl Mode {
             Mode::CommitMsg => "COMMIT",
             Mode::Terminal => "TERMINAL",
             Mode::Visual => "VISUAL",
+            Mode::FindFile => "FIND FILE",
         }
     }
 }
@@ -61,6 +64,7 @@ mod tests {
             Mode::CommitMsg.label(),
             Mode::Terminal.label(),
             Mode::Visual.label(),
+            Mode::FindFile.label(),
         ];
         for (i, a) in labels.iter().enumerate() {
             for b in &labels[i + 1..] {

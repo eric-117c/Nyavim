@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 use crate::command::{self, Command, Substitute};
 use crate::config::Config;
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
+use crate::finder;
 use crate::git::{self, GitInfo};
 use crate::layout::{self, Layout, SplitDir};
 use crate::mode::Mode;
@@ -141,6 +142,11 @@ pub struct App {
     terminal: Option<Session>,
     /// Commit message being typed after `:commit`.
     commit_message: String,
+    /// `Ctrl+P` state: the project root being listed, its files, the query and the selection.
+    finder_root: Option<std::path::PathBuf>,
+    finder_files: Vec<String>,
+    finder_query: String,
+    finder_selected: usize,
     /// Text typed after `:`, without the colon.
     command_line: String,
     /// Text typed into the palette, and which of the matches is selected.
@@ -177,6 +183,10 @@ impl App {
             last_swap_write: None,
             terminal: None,
             commit_message: String::new(),
+            finder_root: None,
+            finder_files: Vec::new(),
+            finder_query: String::new(),
+            finder_selected: 0,
             command_line: String::new(),
             palette_query: String::new(),
             palette_selected: 0,
@@ -929,6 +939,7 @@ impl App {
             Mode::CommitMsg => self.handle_commit_message(key),
             Mode::Terminal => Outcome::Continue,
             Mode::Visual => self.handle_visual(key),
+            Mode::FindFile => self.handle_find_file(key),
             Mode::Palette => self.handle_palette(key),
         }
     }
@@ -951,6 +962,10 @@ impl App {
                     self.open_terminal();
                     Outcome::Continue
                 }
+                KeyCode::Char('p') => {
+                    self.open_find_file();
+                    Outcome::Continue
+                }
                 KeyCode::Char('r') => {
                     self.redo();
                     Outcome::Continue
@@ -959,7 +974,7 @@ impl App {
                     self.next_buffer();
                     Outcome::Continue
                 }
-                KeyCode::Char('p') => {
+                KeyCode::Char('b') => {
                     self.prev_buffer();
                     Outcome::Continue
                 }
@@ -1683,6 +1698,86 @@ impl App {
         self.message = Some(format!("replaced {done} of {total} occurrences"));
     }
 
+    // ---- file picker ----------------------------------------------------
+
+    /// List the project once, then filter in memory as the user types.
+    pub fn open_find_file(&mut self) {
+        let root = self
+            .document()
+            .path()
+            .and_then(|path| path.parent())
+            .map(|dir| dir.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+        self.finder_files = finder::collect(&root, 5000);
+        self.finder_root = Some(root);
+        self.finder_query.clear();
+        self.finder_selected = 0;
+        self.mode = Mode::FindFile;
+        self.message = None;
+    }
+
+    /// Files matching the query, best first.
+    pub fn finder_matches(&self) -> Vec<&str> {
+        if self.finder_query.is_empty() {
+            return self.finder_files.iter().map(String::as_str).collect();
+        }
+        let mut scored: Vec<(i32, &str)> = self
+            .finder_files
+            .iter()
+            .filter_map(|file| {
+                let name = file.rsplit('/').next().unwrap_or(file);
+                let by_name = command::fuzzy_score(&self.finder_query, name);
+                let by_path = command::fuzzy_score(&self.finder_query, file).map(|score| score / 2);
+                let score = match (by_name, by_path) {
+                    (Some(a), Some(b)) => a.max(b),
+                    (a, b) => a.or(b)?,
+                };
+                Some((score, file.as_str()))
+            })
+            .collect();
+        scored.sort_by_key(|(score, file)| (std::cmp::Reverse(*score), file.to_string()));
+        scored.into_iter().map(|(_, file)| file).collect()
+    }
+
+    pub fn finder_query(&self) -> &str {
+        &self.finder_query
+    }
+
+    pub fn finder_selected(&self) -> usize {
+        self.finder_selected
+    }
+
+    fn handle_find_file(&mut self, key: KeyEvent) -> Outcome {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Enter => {
+                let chosen = self
+                    .finder_matches()
+                    .get(self.finder_selected)
+                    .map(|file| (*file).to_owned());
+                self.mode = Mode::Normal;
+                if let (Some(root), Some(file)) = (self.finder_root.clone(), chosen) {
+                    self.open(root.join(file));
+                }
+            }
+            KeyCode::Up => self.finder_selected = self.finder_selected.saturating_sub(1),
+            KeyCode::Down => {
+                let last = self.finder_matches().len().saturating_sub(1);
+                self.finder_selected = (self.finder_selected + 1).min(last);
+            }
+            KeyCode::Backspace => {
+                self.finder_query.pop();
+                self.finder_selected = 0;
+            }
+            KeyCode::Char(ch) => {
+                self.finder_query.push(ch);
+                self.finder_selected = 0;
+            }
+            _ => {}
+        }
+        Outcome::Continue
+    }
+
     // ---- visual mode ----------------------------------------------------
 
     pub fn start_visual(&mut self) {
@@ -2150,6 +2245,10 @@ impl App {
             }
             "redo" => {
                 self.redo();
+                Outcome::Continue
+            }
+            "find-file" => {
+                self.open_find_file();
                 Outcome::Continue
             }
             "terminal" => {
@@ -2756,7 +2855,7 @@ mod tests {
         app.handle_key(ctrl('n'));
         assert_eq!(app.active(), 0);
         assert_eq!(app.document().line(0), "first");
-        app.handle_key(ctrl('p'));
+        app.handle_key(ctrl('b'));
         assert_eq!(app.active(), 1);
     }
 
@@ -3486,5 +3585,42 @@ mod tests {
         keys(&mut app, "N");
         assert_eq!(app.cursor().line, 1, "N reverses direction");
         assert_eq!(app.search_prefix(), "?");
+    }
+
+    #[test]
+    fn ctrl_p_lists_project_files_and_opens_the_choice() {
+        let dir = std::env::temp_dir().join(format!("nyavim-picker-{}", std::process::id()));
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(dir.join("notes.txt"), "notes\n").unwrap();
+        let start = dir.join("notes.txt");
+
+        let mut app = App::new();
+        app.set_area(80, 24);
+        app.open(&start);
+        app.handle_key(ctrl('p'));
+        assert_eq!(app.mode(), Mode::FindFile);
+        assert!(app
+            .finder_matches()
+            .iter()
+            .any(|file| file.ends_with("main.rs")));
+
+        for ch in "main".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert_eq!(app.finder_matches()[0], "src/main.rs");
+        enter(&mut app);
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.document().line(0), "fn main() {}");
+    }
+
+    #[test]
+    fn escape_closes_the_picker_without_opening_anything() {
+        let (mut app, path) = app_with_path("keep\n");
+        app.open(&path);
+        app.handle_key(ctrl('p'));
+        esc(&mut app);
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.buffers().len(), 1);
     }
 }
