@@ -43,6 +43,7 @@ Everything below is the same release; versions were not cut while the editor was
 ### Known gaps
 - key bindings are not configurable yet: the keymap is a hand-written dispatch that needs to become a
   data-driven action table first
-- no soft wrap or horizontal scrolling: long lines run off the screen
+- wrapping folds long lines by character width; a single line taller than the window still cannot be
+  scrolled through row by row
 - no `.` (repeat last change); splits are fixed at 50/50 and cannot be dragged
 - no file opener beyond `:e <path>`, no system clipboard, splits are fixed at 50/50
