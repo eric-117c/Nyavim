@@ -52,6 +52,15 @@ pub struct Window {
     anchor_state: State,
 }
 
+/// The last change, kept so `.` can replay it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Repeat {
+    Operator(Operator, Motion),
+    DeleteChar,
+    Paste(bool),
+    Insert(InsertKind, String),
+}
+
 /// A `c` substitute walking through its matches, collecting decisions before touching the buffer.
 #[derive(Debug)]
 struct Replacer {
@@ -120,6 +129,12 @@ pub struct App {
     register: Option<Register>,
     /// Named registers (`"ay`, `"ap`).
     named_registers: std::collections::HashMap<char, Register>,
+    /// Last change, for `.`.
+    last_change: Option<Repeat>,
+    /// How the current insert session was entered, so `.` can reopen it the same way.
+    insert_kind: InsertKind,
+    /// Text typed during the current insert session, for `.` on inserts.
+    insert_typed: String,
     /// Where a visual selection started.
     visual_anchor: Option<Pos>,
     /// Whether the current insert session has taken its undo checkpoint yet.
@@ -169,6 +184,9 @@ impl App {
             register: None,
             named_registers: std::collections::HashMap::new(),
             visual_anchor: None,
+            last_change: None,
+            insert_typed: String::new(),
+            insert_kind: InsertKind::Here,
             insert_started: false,
             search: None,
             replacer: None,
@@ -1080,12 +1098,67 @@ impl App {
             Action::Insert(kind) => self.begin_insert(kind),
             Action::DeleteChar => self.delete_under_cursor(1),
             Action::Paste(before) => self.paste(before),
+            Action::Repeat => self.repeat_last_change(),
         }
         Outcome::Continue
     }
 
+    /// `.`: apply the last change again at the cursor.
+    fn repeat_last_change(&mut self) {
+        let Some(repeat) = self.last_change.clone() else {
+            self.message = Some("nothing to repeat yet".to_owned());
+            return;
+        };
+        match repeat {
+            Repeat::Operator(op, motion) => {
+                let Some((start, end)) = self.operator_range(key_for_motion(motion), 1) else {
+                    return;
+                };
+                self.execute_operator(op, start, end);
+            }
+            Repeat::DeleteChar => self.delete_under_cursor(1),
+            Repeat::Paste(before) => self.paste(before),
+            Repeat::Insert(kind, text) => {
+                let line = self.cursor().line;
+                match kind {
+                    InsertKind::LineEnd => {
+                        let end = self.document().line_len(line);
+                        self.set_cursor(Pos::new(line, end));
+                    }
+                    InsertKind::LineStart => self.set_cursor(Pos::new(line, 0)),
+                    InsertKind::After => self.move_cursor_right(1),
+                    InsertKind::LineBelow | InsertKind::LineAbove => {
+                        let at = if kind == InsertKind::LineBelow {
+                            Pos::new(line, self.document().line_len(line))
+                        } else {
+                            Pos::new(line, 0)
+                        };
+                        self.set_cursor(at);
+                        self.checkpoint();
+                        self.edit(|doc, cursor| doc.insert_newline(cursor));
+                        if kind == InsertKind::LineAbove {
+                            self.set_cursor(Pos::new(line, 0));
+                        }
+                    }
+                    InsertKind::Here => {}
+                }
+                self.checkpoint();
+                self.edit(|doc, cursor| {
+                    for ch in text.chars() {
+                        if ch == '\n' {
+                            doc.insert_newline(cursor);
+                        } else {
+                            doc.insert_char(cursor, ch);
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     /// Enter insert mode at the place the action asks for.
     fn begin_insert(&mut self, kind: InsertKind) {
+        self.insert_kind = kind;
         let line = self.cursor().line;
         match kind {
             InsertKind::Here => self.enter_insert(),
@@ -1202,6 +1275,7 @@ impl App {
                 text: removed,
                 linewise: false,
             });
+            self.last_change = Some(Repeat::DeleteChar);
         }
     }
 
@@ -1250,6 +1324,9 @@ impl App {
         let Some((start, end)) = self.operator_range(key.code, count) else {
             return;
         };
+        if let Some(motion) = keymap::motion_for(key.code) {
+            self.last_change = Some(Repeat::Operator(op, motion));
+        }
         if start == end {
             return;
         }
@@ -1373,6 +1450,7 @@ impl App {
             return;
         };
         self.checkpoint();
+        self.last_change = Some(Repeat::Paste(before));
         if register.linewise {
             let lines: Vec<String> = register.text.split('\n').map(str::to_owned).collect();
             let at = if before {
@@ -2033,10 +2111,22 @@ impl App {
         if mutates && !self.insert_started {
             self.checkpoint();
             self.insert_started = true;
+            self.insert_typed.clear();
+        }
+        if let KeyCode::Char(ch) = key.code {
+            self.insert_typed.push(ch);
+        } else if key.code == KeyCode::Enter {
+            self.insert_typed.push('\n');
+        } else if key.code == KeyCode::Tab {
+            self.insert_typed.push('\t');
         }
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
+                if !self.insert_typed.is_empty() {
+                    let text = std::mem::take(&mut self.insert_typed);
+                    self.last_change = Some(Repeat::Insert(self.insert_kind, text));
+                }
                 self.recompute_marks();
                 let cursor = self.cursor();
                 if cursor.col > 0 {
@@ -2396,6 +2486,20 @@ impl App {
                 Outcome::Quit
             }
         }
+    }
+}
+
+/// The key that produces `motion`, so a repeat can go back through the same range calculation.
+fn key_for_motion(motion: Motion) -> KeyCode {
+    match motion {
+        Motion::Left => KeyCode::Char('h'),
+        Motion::Right => KeyCode::Char('l'),
+        Motion::Up => KeyCode::Char('k'),
+        Motion::Down => KeyCode::Char('j'),
+        Motion::WordForward => KeyCode::Char('w'),
+        Motion::WordBackward => KeyCode::Char('b'),
+        Motion::LineStart => KeyCode::Char('0'),
+        Motion::LineEnd => KeyCode::Char('$'),
     }
 }
 
@@ -3631,5 +3735,46 @@ mod tests {
         esc(&mut app);
         assert_eq!(app.mode(), Mode::Normal);
         assert_eq!(app.buffers().len(), 1);
+    }
+
+    #[test]
+    fn dot_repeats_the_last_operator_with_its_motion() {
+        let mut app = app_with("one two three four\n");
+        keys(&mut app, "dw"); // delete "one "
+        assert_eq!(app.document().line(0), "two three four");
+        keys(&mut app, ".");
+        assert_eq!(app.document().line(0), "three four");
+        keys(&mut app, ".");
+        assert_eq!(app.document().line(0), "four");
+    }
+
+    #[test]
+    fn dot_repeats_a_delete_character_and_a_paste() {
+        let mut app = app_with("abc\n");
+        keys(&mut app, "x");
+        keys(&mut app, ".");
+        assert_eq!(app.document().line(0), "c");
+
+        keys(&mut app, "p"); // put "b" back
+        keys(&mut app, ".");
+        assert_eq!(app.document().line(0), "cbb");
+    }
+
+    #[test]
+    fn dot_replays_the_text_of_an_insert_session() {
+        let mut app = app_with("a\nb\n");
+        keys(&mut app, "A-ok");
+        esc(&mut app);
+        assert_eq!(app.document().line(0), "a-ok");
+        keys(&mut app, "j");
+        keys(&mut app, ".");
+        assert_eq!(app.document().line(1), "b-ok");
+    }
+
+    #[test]
+    fn dot_without_a_previous_change_says_so() {
+        let mut app = app_with("abc\n");
+        keys(&mut app, ".");
+        assert!(app.message().unwrap().contains("nothing to repeat"));
     }
 }

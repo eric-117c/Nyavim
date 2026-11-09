@@ -27,6 +27,8 @@ pub enum Action {
     Insert(InsertKind),
     DeleteChar,
     Paste(bool),
+    /// `.` — replay the last change.
+    Repeat,
 }
 
 /// A cursor movement. Motions are pure: given a cursor they return a new one, so the same table
@@ -123,6 +125,7 @@ pub fn plain_binding(code: KeyCode) -> Option<Action> {
         KeyCode::Char('x') => Action::DeleteChar,
         KeyCode::Char('p') => Action::Paste(false),
         KeyCode::Char('P') => Action::Paste(true),
+        KeyCode::Char('.') => Action::Repeat,
         _ => return None,
     };
     Some(action)
@@ -149,6 +152,7 @@ pub fn bindings() -> Vec<(&'static str, Action)> {
         ("i a I A o O", Action::Insert(InsertKind::Here)),
         ("x", Action::DeleteChar),
         ("p P", Action::Paste(false)),
+        (".", Action::Repeat),
     ]
 }
 
@@ -176,6 +180,7 @@ impl Action {
             Action::Insert(_) => "insert",
             Action::DeleteChar => "delete-char",
             Action::Paste(_) => "paste",
+            Action::Repeat => "repeat",
         }
     }
 }
