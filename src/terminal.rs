@@ -22,6 +22,8 @@ impl Session {
     pub fn spawn(shell: &str, rows: u16, cols: u16) -> io::Result<Self> {
         let mut master: libc::c_int = -1;
         let mut slave: libc::c_int = -1;
+        // Linux declares this parameter `*const winsize`, macOS declares it `*mut winsize`; casting
+        // to `*mut` satisfies both and still coerces to the const form on Linux.
         let size = libc::winsize {
             ws_row: rows.max(1),
             ws_col: cols.max(1),
@@ -34,8 +36,8 @@ impl Session {
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                &size,
+                std::ptr::null_mut(),
+                std::ptr::addr_of!(size).cast_mut(),
             )
         };
         if opened != 0 {
