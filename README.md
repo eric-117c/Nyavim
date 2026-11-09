@@ -82,7 +82,17 @@ Other known gaps: no system clipboard, and splits are fixed at 50/50 with no dra
 
 The product definition lives in [`goal-and-requirements.md`](./goal-and-requirements.md).
 
-## Build
+## Install
+
+Prebuilt binaries for Linux (x86_64) and macOS (aarch64) are attached to each
+[release](https://github.com/eric-117c/Nyavim/releases).
+
+```sh
+cargo install --path .      # or: cargo install --git https://github.com/eric-117c/Nyavim
+nyavim <file>
+```
+
+From a checkout:
 
 ```sh
 cargo build --release

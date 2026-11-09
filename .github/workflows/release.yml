@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            archive: nyavim-linux-x86_64.tar.gz
+          - os: macos-latest
+            archive: nyavim-macos-aarch64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: tar -czf ${{ matrix.archive }} -C target/release nyavim
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.archive }}
+          generate_release_notes: true
