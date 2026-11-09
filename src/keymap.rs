@@ -25,6 +25,44 @@ pub enum Action {
     SearchBackward,
 }
 
+/// A cursor movement. Motions are pure: given a cursor they return a new one, so the same table
+/// serves both plain movement and an operator's range (`d` + `w`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Motion {
+    Left,
+    Right,
+    Up,
+    Down,
+    WordForward,
+    WordBackward,
+    LineStart,
+    LineEnd,
+}
+
+impl Motion {
+    /// `$` includes the character it lands on; the others stop before it, which is what `d$` versus
+    /// `dl` needs.
+    pub fn inclusive(self) -> bool {
+        matches!(self, Motion::LineEnd)
+    }
+}
+
+/// Motions reachable from normal and visual mode, and after an operator.
+pub fn motion_for(code: KeyCode) -> Option<Motion> {
+    let motion = match code {
+        KeyCode::Char('h') | KeyCode::Left => Motion::Left,
+        KeyCode::Char('l') | KeyCode::Right => Motion::Right,
+        KeyCode::Char('j') | KeyCode::Down => Motion::Down,
+        KeyCode::Char('k') | KeyCode::Up => Motion::Up,
+        KeyCode::Char('w') => Motion::WordForward,
+        KeyCode::Char('b') => Motion::WordBackward,
+        KeyCode::Char('0') | KeyCode::Home => Motion::LineStart,
+        KeyCode::Char('$') | KeyCode::End => Motion::LineEnd,
+        _ => return None,
+    };
+    Some(motion)
+}
+
 /// Actions reachable with `Ctrl` plus one key.
 pub fn ctrl_binding(code: KeyCode) -> Option<Action> {
     let action = match code {
@@ -121,6 +159,19 @@ mod tests {
             );
         }
         assert_eq!(plain_binding(KeyCode::Char('u')), Some(Action::Undo));
+    }
+
+    #[test]
+    fn every_motion_key_is_reachable_and_unique() {
+        let keys = ['h', 'l', 'j', 'k', 'w', 'b', '0', '$'];
+        let mut seen = std::collections::HashSet::new();
+        for key in keys {
+            let motion = motion_for(KeyCode::Char(key)).expect(key.to_string().as_str());
+            assert!(seen.insert(motion), "{key} duplicates {motion:?}");
+        }
+        assert!(motion_for(KeyCode::Char('z')).is_none());
+        assert!(Motion::LineEnd.inclusive());
+        assert!(!Motion::WordForward.inclusive());
     }
 
     #[test]

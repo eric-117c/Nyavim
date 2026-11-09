@@ -12,7 +12,7 @@ use crate::config::Config;
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
 use crate::finder;
 use crate::git::{self, GitInfo};
-use crate::keymap::{self, Action};
+use crate::keymap::{self, Action, Motion};
 use crate::layout::{self, Layout, SplitDir};
 use crate::mode::Mode;
 use crate::swap;
@@ -1020,6 +1020,13 @@ impl App {
         let count = self.input.take_count();
         let cursor = self.cursor();
 
+        // motions come from the table, with the count the user typed
+        if let Some(motion) = keymap::motion_for(key.code) {
+            let target = self.apply_motion(cursor, motion, count);
+            self.set_cursor(target);
+            return;
+        }
+
         // one key, one self-contained action: the table owns these
         if let Some(action) = keymap::plain_binding(key.code) {
             self.input.count = None;
@@ -1282,22 +1289,28 @@ impl App {
         }
     }
 
-    /// The half-open range an operator would touch if followed by `code`, found by running the
-    /// motion on a copy of the buffer.
-    fn operator_range(&self, code: KeyCode, count: usize) -> Option<(Pos, Pos)> {
-        let start = self.cursor();
+    /// Apply a table-defined motion to a cursor.
+    fn apply_motion(&self, cursor: Pos, motion: Motion, count: usize) -> Pos {
         let doc = self.document();
-        let (target, inclusive) = match code {
-            KeyCode::Char('h') | KeyCode::Left => (doc.move_left(start, count), false),
-            KeyCode::Char('l') | KeyCode::Right => (doc.move_right(start, count), false),
-            KeyCode::Char('w') => (doc.move_word_forward(start, count), false),
-            KeyCode::Char('b') => (doc.move_word_backward(start, count), false),
-            KeyCode::Char('0') | KeyCode::Home => (Pos::new(start.line, 0), false),
-            KeyCode::Char('$') | KeyCode::End => (doc.move_line_end(start), true),
-            _ => return None,
-        };
+        match motion {
+            Motion::Left => doc.move_left(cursor, count),
+            Motion::Right => doc.move_right(cursor, count),
+            Motion::Up => doc.move_up(cursor, count),
+            Motion::Down => doc.move_down(cursor, count),
+            Motion::WordForward => doc.move_word_forward(cursor, count),
+            Motion::WordBackward => doc.move_word_backward(cursor, count),
+            Motion::LineStart => Pos::new(cursor.line, 0),
+            Motion::LineEnd => doc.move_line_end(cursor),
+        }
+    }
+
+    /// The half-open range an operator would touch if followed by this motion.
+    fn operator_range(&self, code: KeyCode, count: usize) -> Option<(Pos, Pos)> {
+        let motion = keymap::motion_for(code)?;
+        let start = self.cursor();
+        let target = self.apply_motion(start, motion, count);
         let (a, b) = ordered(start, target);
-        if inclusive {
+        if motion.inclusive() {
             Some((a, Pos::new(b.line, b.col + 1)))
         } else {
             Some((a, b))
@@ -1808,17 +1821,11 @@ impl App {
             KeyCode::Char('y') => self.visual_operator(Operator::Yank),
             KeyCode::Char('c') => self.visual_operator(Operator::Change),
             KeyCode::Char('"') => self.input.awaiting_register = true,
-            KeyCode::Char('h') | KeyCode::Left => self.motion(|doc, c| doc.move_left(c, count)),
-            KeyCode::Char('l') | KeyCode::Right => self.motion(|doc, c| doc.move_right(c, count)),
-            KeyCode::Char('j') | KeyCode::Down => self.motion(|doc, c| doc.move_down(c, count)),
-            KeyCode::Char('k') | KeyCode::Up => self.motion(|doc, c| doc.move_up(c, count)),
-            KeyCode::Char('w') => self.motion(|doc, c| doc.move_word_forward(c, count)),
-            KeyCode::Char('b') => self.motion(|doc, c| doc.move_word_backward(c, count)),
-            KeyCode::Char('0') | KeyCode::Home => {
-                let line = self.cursor().line;
-                self.set_cursor(Pos::new(line, 0));
+            _ if keymap::motion_for(key.code).is_some() => {
+                let motion = keymap::motion_for(key.code).expect("checked above");
+                let target = self.apply_motion(self.cursor(), motion, count);
+                self.set_cursor(target);
             }
-            KeyCode::Char('$') | KeyCode::End => self.motion(|doc, c| doc.move_line_end(c)),
             _ => {}
         }
         Outcome::Continue
