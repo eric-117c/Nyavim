@@ -166,7 +166,8 @@ mod tests {
         let keys = ['h', 'l', 'j', 'k', 'w', 'b', '0', '$'];
         let mut seen = std::collections::HashSet::new();
         for key in keys {
-            let motion = motion_for(KeyCode::Char(key)).expect(key.to_string().as_str());
+            let motion = motion_for(KeyCode::Char(key))
+                .unwrap_or_else(|| panic!("{key} is not bound to a motion"));
             assert!(seen.insert(motion), "{key} duplicates {motion:?}");
         }
         assert!(motion_for(KeyCode::Char('z')).is_none());
