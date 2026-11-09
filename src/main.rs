@@ -6,6 +6,7 @@ mod config;
 mod document;
 mod finder;
 mod git;
+mod keymap;
 mod layout;
 mod mode;
 mod swap;

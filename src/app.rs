@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
 use crate::finder;
 use crate::git::{self, GitInfo};
+use crate::keymap::{self, Action};
 use crate::layout::{self, Layout, SplitDir};
 use crate::mode::Mode;
 use crate::swap;
@@ -948,38 +949,10 @@ impl App {
 
     fn handle_normal(&mut self, key: KeyEvent) -> Outcome {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
-            return match key.code {
-                KeyCode::Char('q') => self.try_quit(),
-                KeyCode::Char('k') => {
-                    self.open_palette();
-                    Outcome::Continue
-                }
-                KeyCode::Char('w') => {
-                    self.mode = Mode::WindowCmd;
-                    Outcome::Continue
-                }
-                KeyCode::Char('t') => {
-                    self.open_terminal();
-                    Outcome::Continue
-                }
-                KeyCode::Char('p') => {
-                    self.open_find_file();
-                    Outcome::Continue
-                }
-                KeyCode::Char('r') => {
-                    self.redo();
-                    Outcome::Continue
-                }
-                KeyCode::Char('n') => {
-                    self.next_buffer();
-                    Outcome::Continue
-                }
-                KeyCode::Char('b') => {
-                    self.prev_buffer();
-                    Outcome::Continue
-                }
-                _ => Outcome::Continue,
-            };
+            if let Some(action) = keymap::ctrl_binding(key.code) {
+                return self.run_action(action);
+            }
+            return Outcome::Continue;
         }
 
         match key.code {
@@ -1046,6 +1019,13 @@ impl App {
         let had_count = self.input.count.is_some();
         let count = self.input.take_count();
         let cursor = self.cursor();
+
+        // one key, one self-contained action: the table owns these
+        if let Some(action) = keymap::plain_binding(key.code) {
+            self.input.count = None;
+            self.run_action(action);
+            return;
+        }
         match key.code {
             KeyCode::Char('h') | KeyCode::Left => self.motion(|doc, c| doc.move_left(c, count)),
             KeyCode::Char('j') | KeyCode::Down => self.motion(|doc, c| doc.move_down(c, count)),
@@ -1099,17 +1079,32 @@ impl App {
             KeyCode::Char('x') => self.delete_under_cursor(count),
             KeyCode::Char('p') => self.paste(false),
             KeyCode::Char('P') => self.paste(true),
-            KeyCode::Char('u') => self.undo(),
-            KeyCode::Char('v') => self.start_visual(),
             KeyCode::Char('"') => self.input.awaiting_register = true,
-            KeyCode::Char('J') => self.join_lines(),
-            KeyCode::Char('%') => self.jump_to_matching_bracket(),
-            KeyCode::Char('/') => self.start_search(true),
-            KeyCode::Char('?') => self.start_search(false),
             KeyCode::Char('n') => self.search_next(),
             KeyCode::Char('N') => self.search_previous(),
             _ => {}
         }
+    }
+
+    /// Execute one table-driven action.
+    fn run_action(&mut self, action: Action) -> Outcome {
+        match action {
+            Action::Quit => return self.try_quit(),
+            Action::Palette => self.open_palette(),
+            Action::WindowCommand => self.mode = Mode::WindowCmd,
+            Action::Terminal => self.open_terminal(),
+            Action::FindFile => self.open_find_file(),
+            Action::NextBuffer => self.next_buffer(),
+            Action::PrevBuffer => self.prev_buffer(),
+            Action::Undo => self.undo(),
+            Action::Redo => self.redo(),
+            Action::Visual => self.start_visual(),
+            Action::JoinLines => self.join_lines(),
+            Action::MatchBracket => self.jump_to_matching_bracket(),
+            Action::SearchForward => self.start_search(true),
+            Action::SearchBackward => self.start_search(false),
+        }
+        Outcome::Continue
     }
 
     fn enter_insert(&mut self) {

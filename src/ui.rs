@@ -917,6 +917,18 @@ fn draw_help(frame: &mut Frame, app: &App) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
+        " Actions (table-driven)",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    for (label, action) in crate::keymap::bindings() {
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {label:<14}")),
+            Span::styled(action.name(), Style::default().fg(Color::Gray)),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
         " Syntax highlighting follows the file extension; the status line shows what was detected.",
         Style::default().fg(Color::DarkGray),
     )));
