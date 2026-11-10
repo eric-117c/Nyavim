@@ -54,7 +54,8 @@ title: nyavim 架构：分层、事件循环与可发现性契约
 - **已迁入表的**：`Ctrl+Q/K/W/T/P/N/B/R`、`u v J % / ?`、全部 motion（`hjkl w b 0 $`，含 `inclusive` 语义），以及带参的 `d`/`c`/`y`、`i a I A o O`、`x`、`p P`。
 - 算子与 motion 共用 `apply_motion`：`dw`/`d$` 的范围与 `w`/`$` 的移动是同一份定义，不再各写一套。
 - **仍在手写 matcher 里的**：`g` 前缀（`gg`）、数字计数解析、文本对象（`i`/`a` + 词/引号/括号）、寄存器选择（`"`）。它们都是多键序列，需要把「待决输入状态」也建模进动作才合适。
-- 绑定表现在是运行期数据：`Bindings` 持有默认表，`[keys]` 通过 `apply_overrides` 改写它，坏键或未知动作变成一条警告而不是崩溃。motion、计数与文本对象仍是固定词汇 —— 算子的参数是 `Motion`，让它们可改键需要连算子一起参数化，暂不做。
+- 绑定表现在是运行期数据：`Bindings` 持有默认表（含 motion），`[keys]` 通过 `apply_overrides` 改写它，坏键或未知动作变成一条警告而不是崩溃。
+- motion 也是动作（`Action::Move(Motion)`），所以 `"L" = "motion-word-forward"` 之后 `dL` 与 `L` 都生效；`. ` 重放通过 `key_for_motion` 反查当前键位，改键后依然正确。计数与文本对象仍是固定语法。
 - `.` 重复记录的是「动作 + 它的参数」：算子带 motion、插入带 `InsertKind` 与实际键入的文本，所以 `Afoo<Esc>` 后按 `.` 会在新行末尾再插入 `foo`，而不是在光标处。
 
 ## 选择与文本对象

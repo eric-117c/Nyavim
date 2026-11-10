@@ -69,8 +69,8 @@ link = "blue"
 py = "rust"
 ```
 
-Key bindings are configurable now; motions (`hjkl w b 0 $`), counts and text objects are the fixed
-vocabulary operators are built from.
+Key bindings are configurable, motions included: `"L" = "motion-word-forward"`. Counts and text
+objects stay fixed.
 
 ```toml
 [keys]

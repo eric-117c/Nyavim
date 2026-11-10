@@ -48,7 +48,7 @@ Everything below is the same release; versions were not cut while the editor was
   and file types
 
 ### Known gaps
-- motions, counts and text objects cannot be rebound (only whole actions can)
+- counts and text objects cannot be rebound (actions and motions can)
 - wrapping folds long lines by character width; a single line taller than the window still cannot be
   scrolled through row by row
 - no `.` (repeat last change); splits are fixed at 50/50 and cannot be dragged

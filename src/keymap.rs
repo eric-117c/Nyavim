@@ -29,25 +29,6 @@ impl Motion {
     }
 }
 
-/// Motions reachable from normal and visual mode, and after an operator. Motions are not
-/// configurable: they are the vocabulary the operators are built from.
-pub fn motion_for(code: KeyCode) -> Option<Motion> {
-    let motion = match code {
-        KeyCode::Char('h') | KeyCode::Left => Motion::Left,
-        KeyCode::Char('l') | KeyCode::Right => Motion::Right,
-        KeyCode::Char('j') | KeyCode::Down => Motion::Down,
-        KeyCode::Char('k') | KeyCode::Up => Motion::Up,
-        KeyCode::Char('w') => Motion::WordForward,
-        KeyCode::Char('b') => Motion::WordBackward,
-        KeyCode::Char('e') => Motion::WordEnd,
-        KeyCode::Char('E') => Motion::WordEndBig,
-        KeyCode::Char('0') | KeyCode::Home => Motion::LineStart,
-        KeyCode::Char('$') | KeyCode::End => Motion::LineEnd,
-        _ => return None,
-    };
-    Some(motion)
-}
-
 /// An operator waiting for its motion or text object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Operator {
@@ -89,6 +70,7 @@ pub enum Action {
     Paste(bool),
     /// `.` — replay the last change.
     Repeat,
+    Move(Motion),
 }
 
 impl Action {
@@ -122,6 +104,16 @@ impl Action {
             Action::Paste(false) => "paste",
             Action::Paste(true) => "paste-before",
             Action::Repeat => "repeat",
+            Action::Move(Motion::Left) => "motion-left",
+            Action::Move(Motion::Right) => "motion-right",
+            Action::Move(Motion::Up) => "motion-up",
+            Action::Move(Motion::Down) => "motion-down",
+            Action::Move(Motion::WordForward) => "motion-word-forward",
+            Action::Move(Motion::WordBackward) => "motion-word-backward",
+            Action::Move(Motion::WordEnd) => "motion-word-end",
+            Action::Move(Motion::WordEndBig) => "motion-word-end-big",
+            Action::Move(Motion::LineStart) => "motion-line-start",
+            Action::Move(Motion::LineEnd) => "motion-line-end",
         }
     }
 
@@ -155,6 +147,16 @@ impl Action {
             "paste" => Action::Paste(false),
             "paste-before" => Action::Paste(true),
             "repeat" => Action::Repeat,
+            "motion-left" => Action::Move(Motion::Left),
+            "motion-right" => Action::Move(Motion::Right),
+            "motion-up" => Action::Move(Motion::Up),
+            "motion-down" => Action::Move(Motion::Down),
+            "motion-word-forward" => Action::Move(Motion::WordForward),
+            "motion-word-backward" => Action::Move(Motion::WordBackward),
+            "motion-word-end" => Action::Move(Motion::WordEnd),
+            "motion-word-end-big" => Action::Move(Motion::WordEndBig),
+            "motion-line-start" => Action::Move(Motion::LineStart),
+            "motion-line-end" => Action::Move(Motion::LineEnd),
             _ => return None,
         };
         Some(action)
@@ -208,6 +210,16 @@ fn defaults() -> Vec<(&'static str, Action)> {
         ("Ctrl+N", Action::NextBuffer),
         ("Ctrl+B", Action::PrevBuffer),
         ("Ctrl+R", Action::Redo),
+        ("h", Action::Move(Motion::Left)),
+        ("l", Action::Move(Motion::Right)),
+        ("j", Action::Move(Motion::Down)),
+        ("k", Action::Move(Motion::Up)),
+        ("w", Action::Move(Motion::WordForward)),
+        ("b", Action::Move(Motion::WordBackward)),
+        ("e", Action::Move(Motion::WordEnd)),
+        ("E", Action::Move(Motion::WordEndBig)),
+        ("0", Action::Move(Motion::LineStart)),
+        ("$", Action::Move(Motion::LineEnd)),
         ("u", Action::Undo),
         ("v", Action::Visual),
         ("J", Action::JoinLines),
@@ -258,6 +270,27 @@ impl Bindings {
         }
     }
 
+    /// The motion a key is bound to, if any. Operators use this to resolve their argument.
+    pub fn motion_for_key(&self, code: KeyCode, ctrl: bool) -> Option<Motion> {
+        match self.action_for(code, ctrl) {
+            Some(Action::Move(motion)) => Some(motion),
+            _ => None,
+        }
+    }
+
+    /// The key that currently produces `motion`, so `.` can replay an operator through the same
+    /// range calculation even after the user rebinds motions.
+    pub fn key_for_motion(&self, motion: Motion) -> Option<KeyCode> {
+        let plain = self
+            .plain
+            .iter()
+            .find(|(_, action)| *action == Action::Move(motion));
+        if let Some((ch, _)) = plain {
+            return Some(KeyCode::Char(*ch));
+        }
+        None
+    }
+
     pub fn action_for(&self, code: KeyCode, ctrl: bool) -> Option<Action> {
         let KeyCode::Char(ch) = code else {
             return None;
@@ -293,16 +326,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_motion_key_is_unique() {
+    fn every_motion_key_is_unique_and_reachable() {
+        let bindings = Bindings::default();
         let mut seen = std::collections::HashSet::new();
         for key in ['h', 'l', 'j', 'k', 'w', 'b', 'e', 'E', '0', '$'] {
-            let motion = motion_for(KeyCode::Char(key))
+            let motion = bindings
+                .motion_for_key(KeyCode::Char(key), false)
                 .unwrap_or_else(|| panic!("{key} is not bound to a motion"));
             assert!(seen.insert(motion), "{key} duplicates {motion:?}");
+            assert_eq!(
+                bindings.key_for_motion(motion),
+                Some(KeyCode::Char(key)),
+                "the reverse map must agree"
+            );
         }
-        assert!(motion_for(KeyCode::Char('z')).is_none());
+        assert!(bindings.motion_for_key(KeyCode::Char('z'), false).is_none());
         assert!(Motion::LineEnd.inclusive());
         assert!(!Motion::WordForward.inclusive());
+    }
+
+    #[test]
+    fn motions_can_be_rebound_like_any_other_action() {
+        let mut bindings = Bindings::default();
+        bindings.apply_overrides(&[("L".to_owned(), "motion-word-forward".to_owned())]);
+        assert_eq!(
+            bindings.motion_for_key(KeyCode::Char('L'), false),
+            Some(Motion::WordForward)
+        );
+        let replay_key = bindings
+            .key_for_motion(Motion::WordForward)
+            .expect("some key still produces the motion");
+        assert_eq!(
+            bindings.motion_for_key(replay_key, false),
+            Some(Motion::WordForward),
+            "the replay key resolves back to the same motion"
+        );
     }
 
     #[test]

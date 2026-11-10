@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
 use crate::finder;
 use crate::git::{self, GitInfo};
-use crate::keymap::{self, Action, Bindings, InsertKind, Motion, Operator};
+use crate::keymap::{Action, Bindings, InsertKind, Motion, Operator};
 use crate::layout::{self, Layout, SplitDir};
 use crate::mode::Mode;
 use crate::swap;
@@ -1065,7 +1065,7 @@ impl App {
         }
 
         // motions come from the table, with the count the user typed
-        if let Some(motion) = keymap::motion_for(key.code) {
+        if let Some(motion) = self.keymap.motion_for_key(key.code, false) {
             let target = self.apply_motion(cursor, motion, count);
             self.set_cursor(target);
             return;
@@ -1126,6 +1126,10 @@ impl App {
             Action::DeleteChar => self.delete_under_cursor(1),
             Action::Paste(before) => self.paste(before),
             Action::Repeat => self.repeat_last_change(),
+            Action::Move(motion) => {
+                let target = self.apply_motion(self.cursor(), motion, 1);
+                self.set_cursor(target);
+            }
         }
         Outcome::Continue
     }
@@ -1138,7 +1142,12 @@ impl App {
         };
         match repeat {
             Repeat::Operator(op, motion) => {
-                let Some((start, end)) = self.operator_range(key_for_motion(motion), 1) else {
+                let Some((start, end)) = self.operator_range(
+                    self.keymap
+                        .key_for_motion(motion)
+                        .unwrap_or(KeyCode::Char('w')),
+                    1,
+                ) else {
                     return;
                 };
                 self.execute_operator(op, start, end);
@@ -1366,7 +1375,7 @@ impl App {
         let Some((start, end)) = self.operator_range(key.code, count) else {
             return;
         };
-        if let Some(motion) = keymap::motion_for(key.code) {
+        if let Some(motion) = self.keymap.motion_for_key(key.code, false) {
             self.last_change = Some(Repeat::Operator(op, motion));
         }
         if start == end {
@@ -1434,7 +1443,7 @@ impl App {
 
     /// The half-open range an operator would touch if followed by this motion.
     fn operator_range(&self, code: KeyCode, count: usize) -> Option<(Pos, Pos)> {
-        let motion = keymap::motion_for(code)?;
+        let motion = self.keymap.motion_for_key(code, false)?;
         let start = self.cursor();
         let target = self.apply_motion(start, motion, count);
         let (a, b) = ordered(start, target);
@@ -1960,8 +1969,11 @@ impl App {
             KeyCode::Char('y') => self.visual_operator(Operator::Yank),
             KeyCode::Char('c') => self.visual_operator(Operator::Change),
             KeyCode::Char('"') => self.input.awaiting_register = true,
-            _ if keymap::motion_for(key.code).is_some() => {
-                let motion = keymap::motion_for(key.code).expect("checked above");
+            _ if self.keymap.motion_for_key(key.code, false).is_some() => {
+                let motion = self
+                    .keymap
+                    .motion_for_key(key.code, false)
+                    .expect("checked above");
                 let target = self.apply_motion(self.cursor(), motion, count);
                 self.set_cursor(target);
             }
@@ -2558,22 +2570,6 @@ impl App {
                 Outcome::Quit
             }
         }
-    }
-}
-
-/// The key that produces `motion`, so a repeat can go back through the same range calculation.
-fn key_for_motion(motion: Motion) -> KeyCode {
-    match motion {
-        Motion::Left => KeyCode::Char('h'),
-        Motion::Right => KeyCode::Char('l'),
-        Motion::Up => KeyCode::Char('k'),
-        Motion::Down => KeyCode::Char('j'),
-        Motion::WordForward => KeyCode::Char('w'),
-        Motion::WordBackward => KeyCode::Char('b'),
-        Motion::WordEnd => KeyCode::Char('e'),
-        Motion::WordEndBig => KeyCode::Char('E'),
-        Motion::LineStart => KeyCode::Char('0'),
-        Motion::LineEnd => KeyCode::Char('$'),
     }
 }
 
