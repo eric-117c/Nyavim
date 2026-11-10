@@ -181,3 +181,69 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Everything currently on the emulated screen, row by row.
+    fn screen_text(session: &Session) -> String {
+        let (rows, cols) = session.screen().size();
+        let mut out = String::new();
+        for row in 0..rows {
+            for col in 0..cols {
+                if let Some(cell) = session.screen().cell(row, col) {
+                    out.push_str(&cell.contents());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn a_shell_runs_on_a_pty_and_its_output_reaches_the_screen() {
+        let mut session = Session::spawn("/bin/sh", 12, 50).expect("pty must be available");
+        session.write_input(b"echo pty-ok\n");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            session.drain_output();
+            let text = screen_text(&session);
+            if text.contains("pty-ok") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the shell never printed its output; screen was:\n{text}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn resizing_updates_the_grid_and_the_pty() {
+        let mut session = Session::spawn("/bin/sh", 12, 50).expect("pty must be available");
+        session.resize(20, 70);
+        assert_eq!(session.screen().size(), (20, 70));
+        session.resize(5, 30);
+        assert_eq!(session.screen().size(), (5, 30));
+    }
+
+    #[test]
+    fn a_finished_shell_is_reported_as_finished() {
+        let mut session = Session::spawn("/bin/sh", 12, 50).expect("pty must be available");
+        session.write_input(b"exit\n");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            session.drain_output();
+            if session.is_finished() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the shell never exited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}

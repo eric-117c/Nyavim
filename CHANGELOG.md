@@ -47,6 +47,10 @@ Everything below is the same release; versions were not cut while the editor was
 - TOML configuration for tab width, scroll margin, swap interval, read-only threshold, theme colours
   and file types
 
+### Tests
+- the terminal module is covered by tests that spawn a real shell on a pty: output reaches the
+  emulated screen, resizing updates the grid, and an exiting shell is noticed
+
 ### Known gaps
 - counts and text objects cannot be rebound (actions and motions can)
 - wrapping folds long lines by character width; a single line taller than the window still cannot be

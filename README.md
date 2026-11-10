@@ -44,6 +44,15 @@ Usable for real editing today:
 - files over 50 MB open read-only instead of becoming unresponsive
 - line endings and BOM preserved, atomic saves
 
+## Tests
+
+```sh
+cargo test            # 200 unit and integration tests
+```
+
+The terminal tests open a real pty and run `/bin/sh`, so they exercise the same path the editor uses
+rather than a mock.
+
 ## Configuration
 
 Optional, read from `~/.config/nyavim/config.toml` (or `$NYAVIM_CONFIG`). Everything has a default
