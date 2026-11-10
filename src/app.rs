@@ -2436,7 +2436,7 @@ impl App {
                 let delta = arg.trim();
                 let parsed = delta
                     .strip_prefix('+')
-                    .map(|value| value.parse::<i16>().map(|n| n))
+                    .map(str::parse::<i16>)
                     .unwrap_or_else(|| delta.parse::<i16>());
                 match parsed {
                     Ok(value) if delta.starts_with('+') => self.resize_window(value),
