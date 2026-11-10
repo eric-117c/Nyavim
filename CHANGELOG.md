@@ -10,8 +10,9 @@ Everything below is the same release; versions were not cut while the editor was
 - visual mode (`v`, `o`, `d`/`c`/`y` on the selection)
 - text objects: `iw`/`aw`, and `i`/`a` with `"`, `'`, `` ` ``, `(`, `[`, `{`, `<`
 - named registers (`"ay`, `"ap`) alongside the unnamed one
-- `.` repeats the last change (operators with their motion, `x`, `p`, and insert sessions with the
-  text you typed)
+- `e` / `E` word-end motions
+- `.` repeats the last change (operators with their motion, `x`, `p`, insert sessions with the text
+  you typed, and visual selections by width)
 - key bindings are data: a `[keys]` table in the config rewrites them
 
 ### Finding things

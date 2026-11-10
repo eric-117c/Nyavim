@@ -470,6 +470,41 @@ impl Document {
         self.clamp_normal_pos(pos)
     }
 
+    /// `e` / `E`: last character of the current word, or of the next one. `big` treats any run of
+    /// non-space characters as one word, which is what `E` means in vim.
+    pub fn move_word_end(&self, cursor: Pos, count: usize, big: bool) -> Pos {
+        let class_of = |ch: char| {
+            if big {
+                if ch.is_whitespace() {
+                    0
+                } else {
+                    1
+                }
+            } else {
+                char_class(ch)
+            }
+        };
+        let mut pos = cursor;
+        for _ in 0..count.max(1) {
+            // always make progress, then land on the end of whatever run we are in
+            if !self.step_forward(&mut pos) {
+                break;
+            }
+            self.skip_space_forward(&mut pos);
+            if self.at_end_of_text(pos) {
+                break;
+            }
+            let class = class_of(self.char_at(pos).unwrap_or(' '));
+            while let Some(next) = self.char_after(pos) {
+                if class_of(next) != class {
+                    break;
+                }
+                pos = Pos::new(pos.line, pos.col + 1);
+            }
+        }
+        self.clamp_normal_pos(pos)
+    }
+
     /// `b`: start of the previous word, crossing lines.
     pub fn move_word_backward(&self, cursor: Pos, count: usize) -> Pos {
         let mut pos = cursor;
@@ -583,6 +618,25 @@ impl Document {
             }
         }
         (found, false)
+    }
+
+    /// One character forward, crossing to the next line. False at the end of the buffer.
+    fn step_forward(&self, cursor: &mut Pos) -> bool {
+        if cursor.col + 1 < self.line_len(cursor.line) {
+            cursor.col += 1;
+            true
+        } else if cursor.line + 1 < self.line_count() {
+            cursor.line += 1;
+            cursor.col = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The character one column to the right, if any.
+    fn char_after(&self, pos: Pos) -> Option<char> {
+        self.char_at(Pos::new(pos.line, pos.col + 1))
     }
 
     /// Move one character back, crossing to the end of the previous line. False at the start of

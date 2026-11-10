@@ -15,6 +15,8 @@ pub enum Motion {
     Down,
     WordForward,
     WordBackward,
+    WordEnd,
+    WordEndBig,
     LineStart,
     LineEnd,
 }
@@ -23,7 +25,7 @@ impl Motion {
     /// `$` includes the character it lands on; the others stop before it, which is what `d$` versus
     /// `dl` needs.
     pub fn inclusive(self) -> bool {
-        matches!(self, Motion::LineEnd)
+        matches!(self, Motion::LineEnd | Motion::WordEnd | Motion::WordEndBig)
     }
 }
 
@@ -37,6 +39,8 @@ pub fn motion_for(code: KeyCode) -> Option<Motion> {
         KeyCode::Char('k') | KeyCode::Up => Motion::Up,
         KeyCode::Char('w') => Motion::WordForward,
         KeyCode::Char('b') => Motion::WordBackward,
+        KeyCode::Char('e') => Motion::WordEnd,
+        KeyCode::Char('E') => Motion::WordEndBig,
         KeyCode::Char('0') | KeyCode::Home => Motion::LineStart,
         KeyCode::Char('$') | KeyCode::End => Motion::LineEnd,
         _ => return None,
@@ -291,7 +295,7 @@ mod tests {
     #[test]
     fn every_motion_key_is_unique() {
         let mut seen = std::collections::HashSet::new();
-        for key in ['h', 'l', 'j', 'k', 'w', 'b', '0', '$'] {
+        for key in ['h', 'l', 'j', 'k', 'w', 'b', 'e', 'E', '0', '$'] {
             let motion = motion_for(KeyCode::Char(key))
                 .unwrap_or_else(|| panic!("{key} is not bound to a motion"));
             assert!(seen.insert(motion), "{key} duplicates {motion:?}");

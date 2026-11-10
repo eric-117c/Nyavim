@@ -59,6 +59,8 @@ enum Repeat {
     DeleteChar,
     Paste(bool),
     Insert(InsertKind, String),
+    /// A visual selection: how many characters it covered, so `.` can take the same amount again.
+    Visual(Operator, usize),
 }
 
 /// A `c` substitute walking through its matches, collecting decisions before touching the buffer.
@@ -1130,6 +1132,21 @@ impl App {
                 self.execute_operator(op, start, end);
             }
             Repeat::DeleteChar => self.delete_under_cursor(1),
+            Repeat::Visual(op, width) => {
+                let start = self.cursor();
+                let mut end = start;
+                for _ in 0..width {
+                    let next = Pos::new(end.line, end.col + 1);
+                    if end.col < self.document().line_len(end.line) {
+                        end = next;
+                    } else if end.line + 1 < self.document().line_count() {
+                        end = Pos::new(end.line + 1, 0);
+                    } else {
+                        break;
+                    }
+                }
+                self.execute_operator(op, start, end);
+            }
             Repeat::Paste(before) => self.paste(before),
             Repeat::Insert(kind, text) => {
                 let line = self.cursor().line;
@@ -1396,6 +1413,8 @@ impl App {
             Motion::Down => doc.move_down(cursor, count),
             Motion::WordForward => doc.move_word_forward(cursor, count),
             Motion::WordBackward => doc.move_word_backward(cursor, count),
+            Motion::WordEnd => doc.move_word_end(cursor, count, false),
+            Motion::WordEndBig => doc.move_word_end(cursor, count, true),
             Motion::LineStart => Pos::new(cursor.line, 0),
             Motion::LineEnd => doc.move_line_end(cursor),
         }
@@ -1939,8 +1958,10 @@ impl App {
             self.leave_visual();
             return;
         };
+        let width = self.document().slice(start, end).chars().count();
         self.leave_visual();
         self.execute_operator(op, start, end);
+        self.last_change = Some(Repeat::Visual(op, width));
     }
 
     // ---- registers ------------------------------------------------------
@@ -2511,6 +2532,8 @@ fn key_for_motion(motion: Motion) -> KeyCode {
         Motion::Down => KeyCode::Char('j'),
         Motion::WordForward => KeyCode::Char('w'),
         Motion::WordBackward => KeyCode::Char('b'),
+        Motion::WordEnd => KeyCode::Char('e'),
+        Motion::WordEndBig => KeyCode::Char('E'),
         Motion::LineStart => KeyCode::Char('0'),
         Motion::LineEnd => KeyCode::Char('$'),
     }
@@ -3789,5 +3812,50 @@ mod tests {
         let mut app = app_with("abc\n");
         keys(&mut app, ".");
         assert!(app.message().unwrap().contains("nothing to repeat"));
+    }
+
+    #[test]
+    fn e_and_big_e_land_on_word_ends() {
+        let mut app = app_with("alpha beta_gamma delta\n");
+        keys(&mut app, "e");
+        assert_eq!(app.cursor(), Pos::new(0, 4), "end of the first word");
+        keys(&mut app, "e");
+        assert_eq!(app.cursor(), Pos::new(0, 15), "end of the second word");
+        keys(&mut app, "0");
+        keys(&mut app, "E");
+        assert_eq!(
+            app.cursor(),
+            Pos::new(0, 4),
+            "E stops at the same first word end"
+        );
+    }
+
+    #[test]
+    fn e_is_inclusive_for_operators() {
+        let mut app = app_with("alpha beta\n");
+        keys(&mut app, "de");
+        assert_eq!(
+            app.document().line(0),
+            " beta",
+            "de deletes through the last character"
+        );
+    }
+
+    #[test]
+    fn dot_repeats_an_operator_with_the_word_end_motion() {
+        let mut app = app_with("one two three\n");
+        keys(&mut app, "de");
+        assert_eq!(app.document().line(0), " two three");
+        keys(&mut app, ".");
+        assert_eq!(app.document().line(0), " three");
+    }
+
+    #[test]
+    fn dot_repeats_a_visual_selection_by_width() {
+        let mut app = app_with("abcdefghi\n");
+        keys(&mut app, "vlld"); // select "abc" and delete it
+        assert_eq!(app.document().line(0), "defghi");
+        keys(&mut app, ".");
+        assert_eq!(app.document().line(0), "ghi", "three more characters go");
     }
 }
