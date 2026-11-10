@@ -1,6 +1,7 @@
 //! Terminal setup, event loop, and teardown. Everything that knows about the tty lives here.
 
 mod app;
+mod clipboard;
 mod command;
 mod config;
 mod document;

@@ -14,6 +14,7 @@ Everything below is the same release; versions were not cut while the editor was
 - `.` repeats the last change (operators with their motion, `x`, `p`, insert sessions with the text
   you typed, and visual selections by width)
 - key bindings are data: a `[keys]` table in the config rewrites them
+- yanks go to the system clipboard (helper tool, or OSC 52 over ssh); an empty register pastes from it
 
 ### Finding things
 - incremental `/` (forward) and `?` (backward) search with all matches highlighted, `n`/`N`

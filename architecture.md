@@ -17,6 +17,7 @@ title: nyavim 架构：分层、事件循环与可发现性契约
 | 语法着色 | `src/syntax.rs` | 语言判定、行级词法、跨行状态 | 终端、光标、缓冲 |
 | 版本控制 | `src/git.rs` | 仓库/分支探测、行级 diff、提交 | 渲染、按键 |
 | shell 会话 | `src/terminal.rs` | pty、子进程、VT100 解析 | 编辑状态、布局 |
+| 剪贴板 | `src/clipboard.rs` | 外部工具与 OSC 52 两条写路径 | 编辑语义 |
 | 崩溃恢复 | `src/swap.rs` | swap 文件的命名、读写、清理 | 编辑语义、界面 |
 | 用户配置 | `src/config.rs` | 读取 `config.toml`、取值校验、默认值 | 业务逻辑（它只提供参数） |
 | 状态与路由 | `src/app.rs` | 模式、缓冲列表、窗口与焦点、寄存器、待决按键、命令执行 | 渲染、I/O 细节 |

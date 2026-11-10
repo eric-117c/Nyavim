@@ -7,6 +7,7 @@ use std::path::Path;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
+use crate::clipboard;
 use crate::command::{self, Command, Substitute};
 use crate::config::Config;
 use crate::document::{is_case_sensitive, ordered, Document, LoadError, Pos};
@@ -1478,7 +1479,17 @@ impl App {
         }
         let target = self.input.register.take();
         let Some(register) = self.take_register(target) else {
-            self.message = Some("nothing to paste yet".to_owned());
+            // nothing yanked in this session: fall back to the system clipboard
+            match clipboard::paste() {
+                Some(text) => {
+                    self.checkpoint();
+                    let pos = self.cursor();
+                    self.doc_mut().insert_at(pos, &text);
+                    self.set_cursor(advance_pos(pos, &text));
+                    self.clamp_cursor();
+                }
+                None => self.message = Some("nothing to paste yet".to_owned()),
+            }
             return;
         };
         self.checkpoint();
@@ -1967,6 +1978,8 @@ impl App {
     // ---- registers ------------------------------------------------------
 
     fn store_register(&mut self, name: Option<char>, text: String, linewise: bool) {
+        // yanking also reaches the system clipboard, so it survives leaving the terminal
+        let _ = clipboard::copy(&text);
         let register = Register { text, linewise };
         match name {
             Some(name) => {

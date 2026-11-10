@@ -38,6 +38,8 @@ Usable for real editing today:
 - crash recovery: dirty buffers are mirrored to a swap file, offered back on the next open
 - mouse: click tabs to switch, click text to place the cursor, wheel to scroll
 - `Ctrl+P` picks a file from the project (fuzzy, reuses the palette matcher)
+- yanks reach the system clipboard: a helper (`wl-copy`, `xclip`, `pbcopy`) when present, otherwise
+  OSC 52 so it also works over ssh
 - long lines wrap to the window width (`wrap` in the config turns it off)
 - files over 50 MB open read-only instead of becoming unresponsive
 - line endings and BOM preserved, atomic saves
