@@ -126,6 +126,12 @@ pub const COMMANDS: &[Command] = &[
         keys: ":vsp",
     },
     Command {
+        name: "resize",
+        aliases: &[],
+        description: "Move the split around the focused window, e.g. :resize +5",
+        keys: ":resize +/-n",
+    },
+    Command {
         name: "close-window",
         aliases: &["cl", "close"],
         description: "Close this window; the file stays open",
@@ -195,6 +201,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Ctrl+K", "command palette"),
     ("Ctrl+N Ctrl+B", "next / previous open file"),
     (":sp :vsp", "split this window above/below or side by side"),
+    (":resize +5", "move the split around the focused window"),
     (":commit", "type a message, then commit tracked changes"),
     ("Ctrl+P", "pick a file from this project"),
     ("Ctrl+T", "open a shell; Ctrl+\\ returns to the editor"),

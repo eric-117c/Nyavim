@@ -18,6 +18,9 @@ pub enum Layout {
     Leaf(usize),
     Split {
         dir: SplitDir,
+        /// Share of the space taken by `first`, in percent. Clamped to 10..=90 so a pane can never
+        /// be squeezed out of existence.
+        ratio: u16,
         first: Box<Layout>,
         second: Box<Layout>,
     },
@@ -39,8 +42,13 @@ impl Layout {
     pub fn rects(&self, area: Rect, out: &mut Vec<(usize, Rect)>) {
         match self {
             Layout::Leaf(window) => out.push((*window, area)),
-            Layout::Split { dir, first, second } => {
-                let (a, b) = divide(area, *dir);
+            Layout::Split {
+                dir,
+                ratio,
+                first,
+                second,
+            } => {
+                let (a, b) = divide(area, *dir, *ratio);
                 first.rects(a, out);
                 second.rects(b, out);
             }
@@ -49,8 +57,14 @@ impl Layout {
 
     /// The separator cells implied by every split, for drawing.
     pub fn separators(&self, area: Rect, out: &mut Vec<(SplitDir, Rect)>) {
-        if let Layout::Split { dir, first, second } = self {
-            let (a, b) = divide(area, *dir);
+        if let Layout::Split {
+            dir,
+            ratio,
+            first,
+            second,
+        } = self
+        {
+            let (a, b) = divide(area, *dir, *ratio);
             out.push(match dir {
                 SplitDir::SideBySide => (
                     SplitDir::SideBySide,
@@ -76,6 +90,29 @@ impl Layout {
         }
     }
 
+    /// Move the split that contains `window` by `delta` percent, if this subtree holds it.
+    pub fn adjust_ratio(&mut self, window: usize, delta: i16) -> bool {
+        match self {
+            Layout::Leaf(_) => false,
+            Layout::Split {
+                ratio,
+                first,
+                second,
+                ..
+            } => {
+                let inside = first.leaves().contains(&window) || second.leaves().contains(&window);
+                if !inside {
+                    return false;
+                }
+                if first.adjust_ratio(window, delta) || second.adjust_ratio(window, delta) {
+                    return true;
+                }
+                *ratio = (*ratio as i16 + delta).clamp(10, 90) as u16;
+                true
+            }
+        }
+    }
+
     /// Rewrite every leaf id through `f`, keeping the tree shape. Used when a window index shifts.
     pub fn remap(&mut self, f: &dyn Fn(usize) -> usize) {
         match self {
@@ -94,6 +131,7 @@ impl Layout {
                 let old = Layout::Leaf(window);
                 *self = Layout::Split {
                     dir,
+                    ratio: 50,
                     first: Box::new(old),
                     second: Box::new(Layout::Leaf(new_window)),
                 };
@@ -143,27 +181,32 @@ fn without(layout: Layout, window: usize) -> Option<Layout> {
                 Some(Layout::Leaf(found))
             }
         }
-        Layout::Split { dir, first, second } => {
-            match (without(*first, window), without(*second, window)) {
-                (Some(a), Some(b)) => Some(Layout::Split {
-                    dir,
-                    first: Box::new(a),
-                    second: Box::new(b),
-                }),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            }
-        }
+        Layout::Split {
+            dir,
+            ratio,
+            first,
+            second,
+        } => match (without(*first, window), without(*second, window)) {
+            (Some(a), Some(b)) => Some(Layout::Split {
+                dir,
+                ratio,
+                first: Box::new(a),
+                second: Box::new(b),
+            }),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        },
     }
 }
 
-/// Split an area 50/50 with one cell of separator between the halves.
-fn divide(area: Rect, dir: SplitDir) -> (Rect, Rect) {
+/// Divide an area at `ratio` percent, leaving one cell of separator between the halves.
+fn divide(area: Rect, dir: SplitDir, ratio: u16) -> (Rect, Rect) {
+    let ratio = ratio.clamp(10, 90) as u32;
     match dir {
         SplitDir::SideBySide => {
             let available = area.width.saturating_sub(1);
-            let first_width = available / 2;
+            let first_width = (u32::from(available) * ratio / 100) as u16;
             let first = Rect {
                 width: first_width,
                 ..area
@@ -177,7 +220,7 @@ fn divide(area: Rect, dir: SplitDir) -> (Rect, Rect) {
         }
         SplitDir::Stacked => {
             let available = area.height.saturating_sub(1);
-            let first_height = available / 2;
+            let first_height = (u32::from(available) * ratio / 100) as u16;
             let first = Rect {
                 height: first_height,
                 ..area
@@ -371,5 +414,40 @@ mod tests {
             ),
         ];
         assert_eq!(neighbor(&rects, 0, 'l'), None, "no vertical overlap");
+    }
+
+    #[test]
+    fn a_fresh_split_is_even_and_resizing_moves_the_divider() {
+        let mut layout = Layout::leaf(0);
+        layout.split_leaf(0, SplitDir::SideBySide, 1);
+        let mut rects = Vec::new();
+        layout.rects(area(), &mut rects);
+        assert_eq!(rects[0].1.width, 9, "half of 19 cells");
+        assert_eq!(rects[1].1.width, 10);
+
+        assert!(layout.adjust_ratio(1, 20));
+        let mut rects = Vec::new();
+        layout.rects(area(), &mut rects);
+        assert_eq!(rects[0].1.width, 13, "70% of 19 cells");
+        assert_eq!(rects[1].1.width, 6);
+    }
+
+    #[test]
+    fn resizing_clamps_so_a_pane_never_disappears() {
+        let mut layout = Layout::leaf(0);
+        layout.split_leaf(0, SplitDir::Stacked, 1);
+        assert!(layout.adjust_ratio(0, 100));
+        let mut rects = Vec::new();
+        layout.rects(area(), &mut rects);
+        for (_, rect) in &rects {
+            assert!(rect.height >= 1, "both halves keep at least one row");
+        }
+    }
+
+    #[test]
+    fn resizing_ignores_windows_that_are_not_in_the_split() {
+        let mut layout = Layout::leaf(0);
+        layout.split_leaf(0, SplitDir::SideBySide, 1);
+        assert!(!layout.adjust_ratio(99, 10));
     }
 }

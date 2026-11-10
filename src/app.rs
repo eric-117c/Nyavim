@@ -420,6 +420,17 @@ impl App {
         self.focus
     }
 
+    /// `:resize +5` / `:resize -5`: move the split around the focused window.
+    pub fn resize_window(&mut self, delta: i16) {
+        if self.windows.len() <= 1 {
+            self.message = Some("only one window".to_owned());
+            return;
+        }
+        if self.layout.adjust_ratio(self.focus, delta) {
+            self.message = Some(format!("resized by {delta:+}%"));
+        }
+    }
+
     /// Split the focused window, showing the same buffer at the same place in both halves.
     pub fn split_window(&mut self, dir: SplitDir) {
         let current = self.windows[self.focus];
@@ -2421,6 +2432,20 @@ impl App {
                 self.split_window(SplitDir::SideBySide);
                 Outcome::Continue
             }
+            "resize" => {
+                let delta = arg.trim();
+                let parsed = delta
+                    .strip_prefix('+')
+                    .map(|value| value.parse::<i16>().map(|n| n))
+                    .unwrap_or_else(|| delta.parse::<i16>());
+                match parsed {
+                    Ok(value) if delta.starts_with('+') => self.resize_window(value),
+                    Ok(value) if delta.starts_with('-') => self.resize_window(-value),
+                    Ok(value) => self.resize_window(value),
+                    Err(_) => self.message = Some("usage: :resize +5  or  :resize -5".to_owned()),
+                }
+                Outcome::Continue
+            }
             "close-window" => {
                 self.close_window();
                 Outcome::Continue
@@ -3870,5 +3895,32 @@ mod tests {
         assert_eq!(app.document().line(0), "defghi");
         keys(&mut app, ".");
         assert_eq!(app.document().line(0), "ghi", "three more characters go");
+    }
+
+    #[test]
+    fn resize_moves_the_divider_of_the_focused_window() {
+        let mut app = app_with("alpha\n");
+        app.set_area(80, 24);
+        run_cmd(&mut app, "vsp");
+        let before: Vec<u16> = app
+            .window_rects()
+            .iter()
+            .map(|(_, rect)| rect.width)
+            .collect();
+        run_cmd(&mut app, "resize +10");
+        let after: Vec<u16> = app
+            .window_rects()
+            .iter()
+            .map(|(_, rect)| rect.width)
+            .collect();
+        assert_ne!(before, after, "the split moved");
+        assert!(app.message().unwrap().contains("resized"));
+    }
+
+    #[test]
+    fn resize_with_one_window_is_refused() {
+        let mut app = app_with("alpha\n");
+        run_cmd(&mut app, "resize +10");
+        assert!(app.message().unwrap().contains("only one window"));
     }
 }

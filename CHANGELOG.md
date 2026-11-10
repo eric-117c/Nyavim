@@ -25,7 +25,8 @@ Everything below is the same release; versions were not cut while the editor was
   command line and the `F1` page
 
 ### Layout
-- tabs, and window splits (`:sp`, `:vsp`, `Ctrl+W` `hjkl`/`w`/`c`/`o`) with per-window cursors
+- tabs, and window splits (`:sp`, `:vsp`, `Ctrl+W` `hjkl`/`w`/`c`/`o`) with per-window cursors,
+  and `:resize +5` / `:resize -5` to move a divider
 - mouse: click a tab, click text to place the cursor, wheel to scroll
 
 ### Knowing what's going on
